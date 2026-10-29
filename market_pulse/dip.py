@@ -304,7 +304,7 @@ PANEL_HEAD = 1.02
 FOOTER_HEIGHT = 0.95
 # Column right edges, in inches from the panel's inner left edge; the date is left-aligned.
 COLUMNS = [("跌幅", 3.20), ("+1D", 4.65), ("+20D", 6.10), ("+60D", 7.55), ("+1Y", 9.00),
-           ("60 天内最低", 10.65), ("回本天数", 12.05)]
+           ("60 天内最低", 10.65), ("回本（交易日）", 12.05)]
 
 
 def signed(value, digits=1):
