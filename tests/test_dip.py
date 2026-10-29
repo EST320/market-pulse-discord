@@ -56,6 +56,44 @@ class FindDropsTest(unittest.TestCase):
         self.assertIsNone(event["forward"][60])
 
 
+class FurtherFallAndBaselineTest(unittest.TestCase):
+    def test_lowest_close_in_the_next_sixty_sessions(self):
+        dates, closes = series(*([-10, -5, 3] + [0.5] * 70))
+        (event,) = dip.find_drops(dates, closes, 8)
+        # Down 5% the next day, then climbing: the low is that next close.
+        self.assertAlmostEqual(event["low"], -5.0)
+
+    def test_no_further_fall_is_zero_and_an_open_window_is_unknown(self):
+        dates, closes = series(*([-10] + [1] * 70))
+        self.assertEqual(dip.find_drops(dates, closes, 8)[0]["low"], 0.0)
+        dates, closes = series(*([0] * 5 + [-10, 1]))
+        self.assertIsNone(dip.find_drops(dates, closes, 8)[0]["low"])
+
+    def test_one_year_horizon(self):
+        dates, closes = series(*([-10] + [0] * 249 + [20]))
+        (event,) = dip.find_drops(dates, closes, 8)
+        self.assertAlmostEqual(event["forward"][250], 20.0)
+
+    def test_baseline_is_buying_on_every_day(self):
+        # Rising 1% a day: every 60-day window is up, and nothing ever falls further.
+        dates, closes = series(*([1] * 400))
+        normal = dip.baseline(closes)
+        self.assertEqual(normal["win_rate"], 100.0)
+        self.assertAlmostEqual(normal["average_60"], (1.01 ** 60 - 1) * 100)
+        self.assertAlmostEqual(normal["average_250"], (1.01 ** 250 - 1) * 100)
+        self.assertEqual(normal["average_low"], 0.0)
+
+    def test_baseline_without_enough_history(self):
+        dates, closes = series(*([1] * 30))
+        self.assertEqual(dip.baseline(closes),
+                         {"win_rate": None, "average_60": None, "average_250": None, "average_low": None})
+
+    def test_clustered_drops(self):
+        dates, closes = series(*([-9, 9, 0, -9] + [0] * 10 + [-9]))
+        events = dip.find_drops(dates, closes, 8)
+        self.assertEqual([e["index"] for e in dip.clustered(events)], [4])
+
+
 class ChooseThresholdTest(unittest.TestCase):
     def test_default_when_the_count_is_readable(self):
         dates, closes = series(*([-9, 9] * 6))
@@ -152,6 +190,20 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("1 of 2 were lower 60 trading days later", headlines)
         self.assertTrue(any(h.startswith("Biggest drop: -10.00%") for h in headlines))
         self.assertTrue(notes[-1][1].startswith("* Before 2008"))
+
+    def test_cluster_note(self):
+        moves = [-10, 0, -9] + [1] * 70
+        dates, closes = series(*moves)
+        events = dip.find_drops(dates, closes, 8)
+        notes = dip.build_notes(dip.summarise(events, dates, closes), "XYZ", events)
+        self.assertTrue(any("1 drop came within 5 trading days" in detail for _, detail in notes))
+
+    def test_summary_includes_the_new_figures(self):
+        dates, closes = series(*([-10] + [0.2] * 300))
+        summary = dip.summarise(dip.find_drops(dates, closes, 8), dates, closes)
+        self.assertAlmostEqual(summary["average_250"], (1.002 ** 250 - 1) * 100)
+        self.assertEqual(summary["average_low"], 0.0)
+        self.assertIsNotNone(summary["baseline"]["win_rate"])
 
     def test_plural(self):
         self.assertEqual(dip.plural(1, "EVENT"), "1 EVENT")

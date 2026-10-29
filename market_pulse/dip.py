@@ -1,6 +1,7 @@
-"""Buy-the-dip study for one stock: every large single-day drop since the IPO and
-what the stock did 1, 20 and 60 trading days later, split into drops on an
-earnings release and the rest.
+"""Buy-the-dip study for one stock: every large single-day drop since the IPO,
+what the stock did 1, 20, 60 and 250 trading days later and how much further
+it fell first, split into drops on an earnings release and the rest, and set
+against what buying on an ordinary day would have returned.
 
 Usage:
     python -m market_pulse.dip GOOGL [threshold]
@@ -50,7 +51,11 @@ HEADERS = {
 OUTPUT_FILE = Path("dip.png")
 
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
-HORIZONS = (1, 20, 60)
+HORIZONS = (1, 20, 60, 250)
+# Window for the further fall after a drop: the lowest close in the next 60 sessions.
+LOW_WINDOW = 60
+# Drops this close to an earlier one share most of their aftermath.
+CLUSTER_DAYS = 5
 DEFAULT_THRESHOLD = 8.0
 # Without an explicit threshold the study stays at 8% even for volatile
 # stocks: raising it would leave only the largest crashes, which for older
@@ -58,7 +63,7 @@ DEFAULT_THRESHOLD = 8.0
 # recent events. Only a steady stock with almost no 8% days gets a lower one.
 LOWER_THRESHOLDS = (7, 6, 5)
 MIN_EVENTS = 4
-MAX_ROWS_PER_PANEL = 12
+MAX_ROWS_PER_PANEL = 10
 
 # Tickers that changed over the years, so that old earnings dates still match.
 SYMBOL_ALIASES = {
@@ -127,8 +132,41 @@ def find_drops(dates, closes, threshold):
             h: (closes[i + h] / closes[i] - 1) * 100 if i + h < len(closes) else None
             for h in HORIZONS
         }
-        events.append({"index": i, "date": dates[i], "change": change, "forward": forward})
+        events.append({"index": i, "date": dates[i], "change": change, "forward": forward,
+                       "low": further_low(closes, i)})
     return events
+
+
+def further_low(closes, i):
+    """How far below the close of day i the stock fell over the next LOW_WINDOW sessions.
+
+    Zero if it never closed lower; None if the window is not complete yet.
+    """
+    if i + LOW_WINDOW >= len(closes):
+        return None
+    lowest = min(closes[i + 1:i + LOW_WINDOW + 1])
+    return min(0.0, (lowest / closes[i] - 1) * 100)
+
+
+def baseline(closes):
+    """The same figures for buying at the close of every day, not just after a drop."""
+    def returns(h):
+        return [(closes[i + h] / closes[i] - 1) * 100 for i in range(len(closes) - h)]
+
+    r60, r250 = returns(60), returns(250)
+    lows = [further_low(closes, i) for i in range(len(closes) - LOW_WINDOW)]
+    mean = lambda values: sum(values) / len(values) if values else None  # noqa: E731
+    return {
+        "win_rate": sum(1 for r in r60 if r > 0) / len(r60) * 100 if r60 else None,
+        "average_60": mean(r60),
+        "average_250": mean(r250),
+        "average_low": mean(lows),
+    }
+
+
+def clustered(events):
+    """Events that came within CLUSTER_DAYS sessions of the one before."""
+    return [b for a, b in zip(events, events[1:]) if b["index"] - a["index"] <= CLUSTER_DAYS]
 
 
 def choose_threshold(dates, closes, requested=None):
@@ -197,16 +235,22 @@ def classify(events, dates, symbol):
 
 
 def summarise(events, dates, closes):
-    """Headline numbers and the two notes under the tables."""
+    """Headline numbers, the ordinary-day baseline and the notes under the tables."""
     finished = [e for e in events if e["forward"][60] is not None]
     winners = [e for e in finished if e["forward"][60] > 0]
+    year = [e["forward"][250] for e in events if e["forward"][250] is not None]
+    lows = [e["low"] for e in events if e["low"] is not None]
     summary = {
         "count": len(events),
         "finished": len(finished),
         "winners": len(winners),
         "win_rate": len(winners) / len(finished) * 100 if finished else None,
         "average_60": sum(e["forward"][60] for e in finished) / len(finished) if finished else None,
+        "average_250": sum(year) / len(year) if year else None,
+        "average_low": sum(lows) / len(lows) if lows else None,
         "losers": [e for e in finished if e["forward"][60] <= 0],
+        "baseline": baseline(closes),
+        "clustered": clustered(events),
     }
 
     # Rank of the latest event among every daily move since the IPO.
@@ -224,14 +268,18 @@ def summarise(events, dates, closes):
 # ============================================================
 # Chart
 # ============================================================
+# Portrait card: the two tables are stacked at full width, so seven columns
+# stay large and readable when Discord scales the image down.
 
 CARD_WIDTH = 14.0
 MARGIN = 0.48
-STAT_TOP, STAT_HEIGHT = 2.05, 1.02
-PANEL_TOP = 3.35
-ROW_HEIGHT = 0.47
-PANEL_HEAD = 1.05
-FOOTER_HEIGHT = 0.62
+STAT_TOP, STAT_HEIGHT = 2.05, 1.30
+PANEL_GAP = 0.26
+ROW_HEIGHT = 0.43
+PANEL_HEAD = 1.02
+FOOTER_HEIGHT = 0.95
+# Column right edges, in inches from the panel's inner left edge; the date is left-aligned.
+COLUMNS = [("DROP", 3.85), ("+1D", 5.35), ("+20D", 6.95), ("+60D", 8.55), ("+1Y", 10.15), ("LOW WITHIN 60D", 12.05)]
 
 
 def signed(value, digits=1):
@@ -252,56 +300,72 @@ def ordinal(n):
     return {1: "biggest", 2: "2nd biggest", 3: "3rd biggest"}.get(n, f"{n}th biggest")
 
 
-def draw_stat(ax, font, x, width, value, caption):
+def draw_stat(ax, font, x, width, value, caption, normal):
     box(ax, x, STAT_TOP, width, STAT_HEIGHT)
-    label(ax, x + 0.24, STAT_TOP + 0.38, value, font(24, bold=True), AMBER)
-    label(ax, x + 0.24, STAT_TOP + 0.78, caption, font(11), MUTED, max_width=width - 0.4)
+    label(ax, x + 0.22, STAT_TOP + 0.38, value, font(23, bold=True), AMBER)
+    label(ax, x + 0.22, STAT_TOP + 0.78, caption, font(10.5), TEXT, max_width=width - 0.36)
+    if normal:
+        label(ax, x + 0.22, STAT_TOP + 1.06, normal, font(10), MUTED, max_width=width - 0.36)
 
 
-def draw_panel(ax, font, x, width, height, title, events, latest_index):
-    box(ax, x, PANEL_TOP, width, height)
-    left, right = x + 0.30, x + width - 0.30
-    label(ax, left, PANEL_TOP + 0.40, title, font(15, bold=True), AMBER)
+def panel_rows(events):
+    hidden = 1 if len(events) > MAX_ROWS_PER_PANEL else 0
+    return max(1, min(len(events), MAX_ROWS_PER_PANEL) + hidden)
 
-    columns = [("DROP", right - 3.15), ("+1D", right - 2.15), ("+20D", right - 1.10), ("+60D", right)]
-    header_y = PANEL_TOP + 0.82
+
+def panel_height(events):
+    return PANEL_HEAD + panel_rows(events) * ROW_HEIGHT + 0.22
+
+
+def draw_panel(ax, font, top, title, events, latest_index):
+    x, width = MARGIN, CARD_WIDTH - 2 * MARGIN
+    height = panel_height(events)
+    box(ax, x, top, width, height)
+    left = x + 0.32
+    right = left + COLUMNS[-1][1]
+    label(ax, left, top + 0.40, title, font(15, bold=True), AMBER)
+
+    header_y = top + 0.80
     label(ax, left, header_y, "DATE", font(10.5, bold=True), MUTED)
-    for name, cx in columns:
-        label(ax, cx, header_y, name, font(10.5, bold=True), MUTED, ha="right")
+    for name, offset in COLUMNS:
+        label(ax, left + offset, header_y, name, font(10.5, bold=True), MUTED, ha="right")
     ax.plot([left, right], [header_y + 0.17] * 2, color=AMBER, linewidth=1, alpha=0.6)
 
     shown = events[-MAX_ROWS_PER_PANEL:]
-    y = PANEL_TOP + PANEL_HEAD + ROW_HEIGHT / 2
+    y = top + PANEL_HEAD + ROW_HEIGHT / 2
     if len(events) > len(shown):
         label(ax, left, y - 0.02, f"Most recent {len(shown)} shown · {plural(len(events) - len(shown), 'earlier event')} "
               "counted in the figures above", font(10), MUTED, max_width=right - left)
         y += ROW_HEIGHT
     if not events:
         label(ax, x + width / 2, y, "None", font(12), MUTED, ha="center")
+
     for event in shown:
         is_latest = event["index"] == latest_index
         if is_latest:
             ax.add_patch(mpatches.FancyBboxPatch(
-                (left - 0.14, y - ROW_HEIGHT / 2 + 0.03), right - left + 0.28, ROW_HEIGHT - 0.06,
+                (left - 0.16, y - ROW_HEIGHT / 2 + 0.03), right - left + 0.32, ROW_HEIGHT - 0.06,
                 boxstyle="round,pad=0,rounding_size=0.06", facecolor="#3a3220", edgecolor=AMBER, linewidth=1))
-        date_font = font(13, bold=True)
+
         # An asterisk marks a drop from before the earnings calendar begins.
+        date_font = font(13, bold=True)
         date_text = event["date"].isoformat() + ("*" if event.get("earnings", False) is None else "")
         label(ax, left, y, date_text, date_font, AMBER if is_latest else TEXT)
         if is_latest:
-            label(ax, left + text_width(date_text, date_font) + 0.14, y, "LATEST",
-                  font(9, bold=True), AMBER)
-        label(ax, columns[0][1], y, f"{event['change']:.2f}%", font(13, bold=True), RED, ha="right")
-        for (name, cx), horizon in zip(columns[1:], HORIZONS):
+            label(ax, left + text_width(date_text, date_font) + 0.14, y, "LATEST", font(9, bold=True), AMBER)
+
+        values = [(f"{event['change']:.2f}%", RED, True)]
+        for horizon in HORIZONS:
             value = event["forward"][horizon]
-            bold = horizon == 60
-            label(ax, cx, y, signed(value), font(13, bold=bold), value_color(value), ha="right")
+            values.append((signed(value), value_color(value), horizon == 60))
+        low = event["low"]
+        low_color = MUTED if low is None or low > -0.05 else RED
+        low_text = "—" if low is None else ("0.0%" if low > -0.05 else f"{low:.1f}%")
+        values.append((low_text, low_color, False))
+        for (name, offset), (text, color, bold) in zip(COLUMNS, values):
+            label(ax, left + offset, y, text, font(13, bold=bold), color, ha="right")
         y += ROW_HEIGHT
-
-
-def panel_rows(events):
-    hidden = 1 if len(events) > MAX_ROWS_PER_PANEL else 0
-    return max(1, min(len(events), MAX_ROWS_PER_PANEL) + hidden)
+    return height
 
 
 def build_notes(summary, symbol, events=()):
@@ -311,8 +375,7 @@ def build_notes(summary, symbol, events=()):
         if losers:
             # The most recent ones, like the tables.
             dates = ("…, " if len(losers) > 6 else "") + ", ".join(e["date"].isoformat() for e in losers[-6:])
-            notes.append((f"{len(losers)} of {summary['finished']} were lower 60 trading days later",
-                          dates))
+            notes.append((f"{len(losers)} of {summary['finished']} were lower 60 trading days later", dates))
         else:
             notes.append((f"All {summary['finished']} were higher 60 trading days later", ""))
     latest, rank = summary["latest"], summary["latest_rank"]
@@ -322,10 +385,18 @@ def build_notes(summary, symbol, events=()):
     elif summary["worst"]:
         worst = summary["worst"]
         notes.append((f"Biggest drop: {worst['change']:.2f}% on {worst['date'].isoformat()}", ""))
+    if summary["clustered"]:
+        n = len(summary["clustered"])
+        notes.append(("", f"{plural(n, 'drop')} came within {CLUSTER_DAYS} trading days of an earlier one, so their "
+                          "outcomes overlap and the events are not fully independent."))
     if any(e.get("earnings", False) is None for e in events):
         notes.append(("", f"* Before {CALENDAR_START.year}, no earnings calendar is available, "
                           "so these drops are not classified."))
     return notes
+
+
+def notes_height(notes):
+    return sum(0.62 if h and d else 0.40 for h, d in notes) + 0.25 if notes else 0
 
 
 def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_path=OUTPUT_FILE):
@@ -337,11 +408,10 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
                   ("OTHER" if unknown else "NON-EARNINGS", others)]
     else:
         panels = [("ALL EVENTS", events)]
-    rows = max(panel_rows(p) for _, p in panels)
-    panel_height = PANEL_HEAD + rows * ROW_HEIGHT + 0.25
     notes = build_notes(summary, symbol, events if classified else ())
-    notes_height = sum(0.62 if h and d else 0.45 for h, d in notes) + 0.30 if notes else 0
-    height = PANEL_TOP + panel_height + 0.25 + max(notes_height, 0) + FOOTER_HEIGHT
+    tables_top = STAT_TOP + STAT_HEIGHT + 0.30
+    tables_height = sum(panel_height(p) for _, p in panels) + PANEL_GAP * (len(panels) - 1)
+    height = tables_top + tables_height + 0.30 + notes_height(notes) + FOOTER_HEIGHT
 
     fig, ax = canvas(CARD_WIDTH, height)
     name = meta.get("longName") or meta.get("shortName") or symbol
@@ -357,41 +427,52 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
           font(15), MUTED)
     ax.plot([MARGIN, CARD_WIDTH - MARGIN], [1.86, 1.86], color=AMBER, linewidth=1.2, alpha=0.7)
 
-    gap = 0.22
-    stat_width = (CARD_WIDTH - 2 * MARGIN - 3 * gap) / 4
+    # Headline figures, each set against buying at the close of any day.
+    normal = summary["baseline"]
+    def any_day(value, text):
+        return None if value is None else f"Any day: {text}"
     stats = [
-        (str(summary["count"]), f"Drops of {threshold:g}%+ in a day since {since}"),
-        (f"{summary['winners']} / {summary['finished']}", "Higher 60 trading days later"),
-        ("—" if summary["win_rate"] is None else f"{summary['win_rate']:.1f}%", "Win rate at +60 trading days"),
-        (signed(summary["average_60"]), "Average return 60 trading days later"),
+        (str(summary["count"]), f"{threshold:g}%+ drops since {since}", None),
+        ("—" if summary["win_rate"] is None else f"{summary['win_rate']:.1f}%",
+         f"Higher 60 days later ({summary['winners']}/{summary['finished']})",
+         any_day(normal["win_rate"], f"{normal['win_rate']:.1f}%" if normal["win_rate"] is not None else "")),
+        (signed(summary["average_60"]), "Average return 60 days later",
+         any_day(normal["average_60"], signed(normal["average_60"]))),
+        (signed(summary["average_250"]), "Average return 1 year later",
+         any_day(normal["average_250"], signed(normal["average_250"]))),
+        ("—" if summary["average_low"] is None else f"{summary['average_low']:.1f}%",
+         "Avg. further fall in 60 days",
+         any_day(normal["average_low"], f"{normal['average_low']:.1f}%" if normal["average_low"] is not None else "")),
     ]
-    for i, (value, caption) in enumerate(stats):
-        draw_stat(ax, font, MARGIN + i * (stat_width + gap), stat_width, value, caption)
+    gap = 0.18
+    stat_width = (CARD_WIDTH - 2 * MARGIN - gap * (len(stats) - 1)) / len(stats)
+    for i, (value, caption, normal_text) in enumerate(stats):
+        draw_stat(ax, font, MARGIN + i * (stat_width + gap), stat_width, value, caption, normal_text)
 
     latest_index = summary["latest"]["index"] if summary["latest"] else None
-    panel_gap = 0.28
-    panel_width = (CARD_WIDTH - 2 * MARGIN - panel_gap * (len(panels) - 1)) / len(panels)
-    for i, (title, panel_events) in enumerate(panels):
-        draw_panel(ax, font, MARGIN + i * (panel_width + panel_gap), panel_width, panel_height,
-                   f"{title}  ·  {plural(len(panel_events), 'EVENT')}", panel_events, latest_index)
+    y = tables_top
+    for title, panel_events in panels:
+        y += draw_panel(ax, font, y, f"{title}  ·  {plural(len(panel_events), 'EVENT')}",
+                        panel_events, latest_index) + PANEL_GAP
 
-    y = PANEL_TOP + panel_height + 0.45
+    y += 0.30 - PANEL_GAP + 0.20
     for headline, detail in notes:
         if headline:
             label(ax, MARGIN, y, headline, font(12.5, bold=True), AMBER, max_width=CARD_WIDTH - 2 * MARGIN)
         if detail:
             label(ax, MARGIN, y + (0.30 if headline else 0), detail, font(11), MUTED,
                   max_width=CARD_WIDTH - 2 * MARGIN)
-        y += 0.62 if headline and detail else 0.45
+        y += 0.62 if headline and detail else 0.40
 
-    footer_y = height - FOOTER_HEIGHT / 2
+    footer_y = height - FOOTER_HEIGHT + 0.36
     ax.plot([MARGIN, CARD_WIDTH - MARGIN], [footer_y - 0.24] * 2, color=RULE, linewidth=1)
-    source = "Source: Yahoo Finance adjusted daily closes; earnings dates: Nasdaq. From the close of the drop day; trading days."
+    source = ("Yahoo Finance adjusted closes; earnings dates: Nasdaq. Returns from the close of the drop day, "
+              "in trading days (1Y = 250). Any day = buying at every close since the first.")
     if not classified:
-        source = "Source: Yahoo Finance adjusted daily closes (earnings calendar unavailable). From the close of the drop day."
-    label(ax, MARGIN, footer_y, source, font(10), MUTED, max_width=CARD_WIDTH - 2 * MARGIN - 3.4)
-    label(ax, CARD_WIDTH - MARGIN, footer_y, "Past results do not guarantee future returns.", font(10, bold=True),
-          RED, ha="right")
+        source = ("Yahoo Finance adjusted closes (earnings calendar unavailable). Returns from the close of the "
+                  "drop day, in trading days (1Y = 250).")
+    label(ax, MARGIN, footer_y, source, font(9.5), MUTED, max_width=CARD_WIDTH - 2 * MARGIN)
+    label(ax, MARGIN, footer_y + 0.30, "Past results do not guarantee future returns.", font(9.5, bold=True), RED)
     return save(fig, out_path)
 
 

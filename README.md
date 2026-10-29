@@ -155,7 +155,7 @@ Each workflow checks out `main` for the code and the [`state`](https://github.co
 | Command | Reply |
 |---|---|
 | `/market` | The market summary image, drawn from current data |
-| `/dip symbol:GOOGL [threshold:8]` | A drop study for one stock: every single-day fall of the threshold or more since its first trading day, and its return 1, 20 and 60 trading days later, split into drops on an earnings release and the rest |
+| `/dip symbol:GOOGL [threshold:8]` | A drop study for one stock: every single-day fall of the threshold or more since its first trading day, its return 1, 20, 60 and 250 trading days later and how much further it fell first, split into drops on an earnings release and the rest |
 
 ![Drop study for GOOGL: every single-day drop of 8% or more, split into earnings-related and other, with 1, 20 and 60 day returns](docs/screenshots/dip-study.png)
 
@@ -164,7 +164,10 @@ Each workflow checks out `main` for the code and the [`state`](https://github.co
 - Prices are Yahoo Finance adjusted daily closes from the first trading day, so splits and dividends do not create false drops. Returns run from the close of the drop day.
 - A drop counts as earnings-related when the company reported before the open that day or after the close the trading day before, according to Nasdaq's historical earnings calendar. That calendar starts in January 2008; earlier drops are marked with an asterisk and left unclassified.
 - Without a threshold the study uses 8%, as in the original, and lowers it towards 5% only for a steady stock that has almost no 8% days. It is never raised for volatile stocks: that would leave only their largest crashes, which for listings such as Amazon all date from the dot-com era. A given threshold is used as is.
-- The four headline figures count every event since the first trading day; each table shows its 12 most recent and says how many earlier ones are counted but not listed.
+- Each headline figure is set against the same figure for buying at the close of any day since the first, so that a high win rate after drops can be told apart from a stock that simply rose most of the time. They count every event since the first trading day; each table shows its 12 most recent and says how many earlier ones are counted but not listed.
+- "Low within 60D" is the lowest close over the next 60 sessions against the close of the drop day: how much further a buyer would have been down before any recovery.
+- Drops within five trading days of an earlier one are counted in a note: they share most of their aftermath, so the events are not fully independent.
+- The two tables are stacked at full width so that all seven columns stay readable when Discord scales the image down.
 - Unknown tickers and stocks without a qualifying drop get a short text reply instead of an image.
 
 ### `/market`
