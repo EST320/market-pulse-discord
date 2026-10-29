@@ -445,7 +445,7 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
     label(ax, MARGIN, 0.42, "MARKET PULSE  ·  大跌回测", font(11, bold=True), AMBER)
     label(ax, CARD_WIDTH - MARGIN, 0.42, f"{symbol}  |  {name}" + (f"  ·  {exchange}" if exchange else ""),
           font(11, bold=True), MUTED, ha="right", max_width=7.5)
-    label(ax, MARGIN, 1.02, f"{symbol} 该不该 Buy the Dip？", font(36, bold=True), TEXT)
+    label(ax, MARGIN, 1.02, f"{symbol} - Buy the Dip？", font(36, bold=True), TEXT)
     since = dates[0].strftime("%Y")
     label(ax, MARGIN, 1.62, f"{since} 年以来所有单日跌幅达到 {threshold:g}% 的交易日，以及之后的走势",
           font(15), MUTED)
