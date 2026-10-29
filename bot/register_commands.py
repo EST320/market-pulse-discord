@@ -29,7 +29,7 @@ COMMANDS = [
             },
             {
                 "name": "threshold",
-                "description": "单日跌幅阈值（%），不填默认 8%",
+                "description": "单日跌幅阈值（%），可填 1 到 50，支持小数；不填默认 8",
                 "type": 10,  # number
                 "required": False,
                 "min_value": 1,
