@@ -133,8 +133,20 @@ def find_drops(dates, closes, threshold):
             for h in HORIZONS
         }
         events.append({"index": i, "date": dates[i], "change": change, "forward": forward,
-                       "low": further_low(closes, i)})
+                       "low": further_low(closes, i), "recovery": recovery_days(closes, i)})
     return events
+
+
+def recovery_days(closes, i):
+    """Trading days until the stock first closed back at or above its close before the drop.
+
+    None if it has not got back there yet.
+    """
+    before = closes[i - 1]
+    for k in range(1, len(closes) - i):
+        if closes[i + k] >= before:
+            return k
+    return None
 
 
 def further_low(closes, i):
@@ -162,6 +174,14 @@ def baseline(closes):
         "average_250": mean(r250),
         "average_low": mean(lows),
     }
+
+
+def median(values):
+    values = sorted(values)
+    if not values:
+        return None
+    middle = len(values) // 2
+    return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
 
 
 def clustered(events):
@@ -251,6 +271,8 @@ def summarise(events, dates, closes):
         "losers": [e for e in finished if e["forward"][60] <= 0],
         "baseline": baseline(closes),
         "clustered": clustered(events),
+        "median_recovery": median([e["recovery"] for e in events if e["recovery"] is not None]),
+        "unrecovered": sum(1 for e in events if e["recovery"] is None),
     }
 
     # Rank of the latest event among every daily move since the IPO.
@@ -268,8 +290,10 @@ def summarise(events, dates, closes):
 # ============================================================
 # Chart
 # ============================================================
-# Portrait card: the two tables are stacked at full width, so seven columns
-# stay large and readable when Discord scales the image down.
+# Labels are Chinese; finance terms such as "Buy the dip" and "Return" and
+# the +1D/+20D/+60D/+1Y horizons stay in English. The two tables are stacked
+# at full width, so eight columns stay readable when Discord scales the
+# image down.
 
 CARD_WIDTH = 14.0
 MARGIN = 0.48
@@ -279,7 +303,8 @@ ROW_HEIGHT = 0.43
 PANEL_HEAD = 1.02
 FOOTER_HEIGHT = 0.95
 # Column right edges, in inches from the panel's inner left edge; the date is left-aligned.
-COLUMNS = [("DROP", 3.85), ("+1D", 5.35), ("+20D", 6.95), ("+60D", 8.55), ("+1Y", 10.15), ("LOW WITHIN 60D", 12.05)]
+COLUMNS = [("跌幅", 3.20), ("+1D", 4.65), ("+20D", 6.10), ("+60D", 7.55), ("+1Y", 9.00),
+           ("60 天内最低", 10.65), ("回本天数", 12.05)]
 
 
 def signed(value, digits=1):
@@ -292,20 +317,20 @@ def value_color(value):
     return GREEN if value > 0 else RED
 
 
-def plural(n, word):
-    return f"{n} {word}" + ("" if n == 1 else ("S" if word.isupper() else "s"))
+def format_days(value):
+    return "—" if value is None else f"{value:,.0f}"
 
 
-def ordinal(n):
-    return {1: "biggest", 2: "2nd biggest", 3: "3rd biggest"}.get(n, f"{n}th biggest")
+def rank_text(n):
+    return "最大" if n == 1 else f"第 {n} 大"
 
 
 def draw_stat(ax, font, x, width, value, caption, normal):
     box(ax, x, STAT_TOP, width, STAT_HEIGHT)
-    label(ax, x + 0.22, STAT_TOP + 0.38, value, font(23, bold=True), AMBER)
-    label(ax, x + 0.22, STAT_TOP + 0.78, caption, font(10.5), TEXT, max_width=width - 0.36)
+    label(ax, x + 0.20, STAT_TOP + 0.38, value, font(22, bold=True), AMBER)
+    label(ax, x + 0.20, STAT_TOP + 0.78, caption, font(10.5), TEXT, max_width=width - 0.32)
     if normal:
-        label(ax, x + 0.22, STAT_TOP + 1.06, normal, font(10), MUTED, max_width=width - 0.36)
+        label(ax, x + 0.20, STAT_TOP + 1.06, normal, font(9.5), MUTED, max_width=width - 0.32)
 
 
 def panel_rows(events):
@@ -326,7 +351,7 @@ def draw_panel(ax, font, top, title, events, latest_index):
     label(ax, left, top + 0.40, title, font(15, bold=True), AMBER)
 
     header_y = top + 0.80
-    label(ax, left, header_y, "DATE", font(10.5, bold=True), MUTED)
+    label(ax, left, header_y, "日期", font(10.5, bold=True), MUTED)
     for name, offset in COLUMNS:
         label(ax, left + offset, header_y, name, font(10.5, bold=True), MUTED, ha="right")
     ax.plot([left, right], [header_y + 0.17] * 2, color=AMBER, linewidth=1, alpha=0.6)
@@ -334,11 +359,11 @@ def draw_panel(ax, font, top, title, events, latest_index):
     shown = events[-MAX_ROWS_PER_PANEL:]
     y = top + PANEL_HEAD + ROW_HEIGHT / 2
     if len(events) > len(shown):
-        label(ax, left, y - 0.02, f"Most recent {len(shown)} shown · {plural(len(events) - len(shown), 'earlier event')} "
-              "counted in the figures above", font(10), MUTED, max_width=right - left)
+        label(ax, left, y - 0.02, f"仅列出最近 {len(shown)} 次，另有 {len(events) - len(shown)} 次更早的大跌已计入上方统计",
+              font(10), MUTED, max_width=right - left)
         y += ROW_HEIGHT
     if not events:
-        label(ax, x + width / 2, y, "None", font(12), MUTED, ha="center")
+        label(ax, x + width / 2, y, "无", font(12), MUTED, ha="center")
 
     for event in shown:
         is_latest = event["index"] == latest_index
@@ -352,7 +377,7 @@ def draw_panel(ax, font, top, title, events, latest_index):
         date_text = event["date"].isoformat() + ("*" if event.get("earnings", False) is None else "")
         label(ax, left, y, date_text, date_font, AMBER if is_latest else TEXT)
         if is_latest:
-            label(ax, left + text_width(date_text, date_font) + 0.14, y, "LATEST", font(9, bold=True), AMBER)
+            label(ax, left + text_width(date_text, date_font) + 0.14, y, "最新", font(9.5, bold=True), AMBER)
 
         values = [(f"{event['change']:.2f}%", RED, True)]
         for horizon in HORIZONS:
@@ -362,6 +387,8 @@ def draw_panel(ax, font, top, title, events, latest_index):
         low_color = MUTED if low is None or low > -0.05 else RED
         low_text = "—" if low is None else ("0.0%" if low > -0.05 else f"{low:.1f}%")
         values.append((low_text, low_color, False))
+        recovery = event["recovery"]
+        values.append(("未回本" if recovery is None else format_days(recovery), MUTED if recovery is None else TEXT, False))
         for (name, offset), (text, color, bold) in zip(COLUMNS, values):
             label(ax, left + offset, y, text, font(13, bold=bold), color, ha="right")
         y += ROW_HEIGHT
@@ -374,24 +401,22 @@ def build_notes(summary, symbol, events=()):
     if summary["finished"]:
         if losers:
             # The most recent ones, like the tables.
-            dates = ("…, " if len(losers) > 6 else "") + ", ".join(e["date"].isoformat() for e in losers[-6:])
-            notes.append((f"{len(losers)} of {summary['finished']} were lower 60 trading days later", dates))
+            dates = ("……、" if len(losers) > 6 else "") + "、".join(e["date"].isoformat() for e in losers[-6:])
+            notes.append((f"{summary['finished']} 次中有 {len(losers)} 次在 60 个交易日后仍低于大跌当天收盘", dates))
         else:
-            notes.append((f"All {summary['finished']} were higher 60 trading days later", ""))
+            notes.append((f"全部 {summary['finished']} 次在 60 个交易日后都高于大跌当天收盘", ""))
     latest, rank = summary["latest"], summary["latest_rank"]
     if latest and rank:
-        notes.append((f"The latest drop, {latest['change']:.2f}% on {latest['date'].isoformat()}, "
-                      f"is the {ordinal(rank)} one-day drop in {symbol}'s history", ""))
+        notes.append((f"最新一次（{latest['date'].isoformat()}，{latest['change']:.2f}%）"
+                      f"是 {symbol} 上市以来{rank_text(rank)}的单日跌幅", ""))
     elif summary["worst"]:
         worst = summary["worst"]
-        notes.append((f"Biggest drop: {worst['change']:.2f}% on {worst['date'].isoformat()}", ""))
+        notes.append((f"最大单日跌幅：{worst['change']:.2f}%（{worst['date'].isoformat()}）", ""))
     if summary["clustered"]:
-        n = len(summary["clustered"])
-        notes.append(("", f"{plural(n, 'drop')} came within {CLUSTER_DAYS} trading days of an earlier one, so their "
-                          "outcomes overlap and the events are not fully independent."))
+        notes.append(("", f"有 {len(summary['clustered'])} 次大跌发生在前一次的 {CLUSTER_DAYS} 个交易日之内，"
+                          "后续走势大部分重叠，并不是完全独立的样本。"))
     if any(e.get("earnings", False) is None for e in events):
-        notes.append(("", f"* Before {CALENDAR_START.year}, no earnings calendar is available, "
-                          "so these drops are not classified."))
+        notes.append(("", f"* {CALENDAR_START.year} 年以前没有财报日历，这些大跌无法判断是否与财报有关。"))
     return notes
 
 
@@ -404,10 +429,10 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
     if classified:
         others = [e for e in events if not e["earnings"]]
         unknown = any(e["earnings"] is None for e in others)
-        panels = [("EARNINGS-RELATED", [e for e in events if e["earnings"]]),
-                  ("OTHER" if unknown else "NON-EARNINGS", others)]
+        panels = [("财报相关", [e for e in events if e["earnings"]]),
+                  ("其他" if unknown else "非财报", others)]
     else:
-        panels = [("ALL EVENTS", events)]
+        panels = [("全部大跌", events)]
     notes = build_notes(summary, symbol, events if classified else ())
     tables_top = STAT_TOP + STAT_HEIGHT + 0.30
     tables_height = sum(panel_height(p) for _, p in panels) + PANEL_GAP * (len(panels) - 1)
@@ -417,34 +442,38 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
     name = meta.get("longName") or meta.get("shortName") or symbol
     exchange = meta.get("fullExchangeName") or meta.get("exchangeName") or ""
 
-    label(ax, MARGIN, 0.42, "MARKET PULSE  ·  DROP STUDY", font(11, bold=True), AMBER)
+    label(ax, MARGIN, 0.42, "MARKET PULSE  ·  大跌回测", font(11, bold=True), AMBER)
     label(ax, CARD_WIDTH - MARGIN, 0.42, f"{symbol}  |  {name}" + (f"  ·  {exchange}" if exchange else ""),
           font(11, bold=True), MUTED, ha="right", max_width=7.5)
-    label(ax, MARGIN, 1.02, f"BUY THE DIP IN {symbol}?", font(38, bold=True), TEXT)
+    label(ax, MARGIN, 1.02, f"{symbol} 该不该 Buy the Dip？", font(36, bold=True), TEXT)
     since = dates[0].strftime("%Y")
-    label(ax, MARGIN, 1.62,
-          f"Every single-day drop of {threshold:g}% or more since {since}, and what the stock did next.",
+    label(ax, MARGIN, 1.62, f"{since} 年以来所有单日跌幅达到 {threshold:g}% 的交易日，以及之后的走势",
           font(15), MUTED)
     ax.plot([MARGIN, CARD_WIDTH - MARGIN], [1.86, 1.86], color=AMBER, linewidth=1.2, alpha=0.7)
 
     # Headline figures, each set against buying at the close of any day.
     normal = summary["baseline"]
+
     def any_day(value, text):
-        return None if value is None else f"Any day: {text}"
+        return None if value is None else f"任意一天买入：{text}"
+
+    median_recovery = summary["median_recovery"]
     stats = [
-        (str(summary["count"]), f"{threshold:g}%+ drops since {since}", None),
+        (str(summary["count"]), f"单日跌 {threshold:g}% 以上的次数", f"{since} 年以来"),
         ("—" if summary["win_rate"] is None else f"{summary['win_rate']:.1f}%",
-         f"Higher 60 days later ({summary['winners']}/{summary['finished']})",
+         f"60 天后上涨（{summary['winners']}/{summary['finished']}）",
          any_day(normal["win_rate"], f"{normal['win_rate']:.1f}%" if normal["win_rate"] is not None else "")),
-        (signed(summary["average_60"]), "Average return 60 days later",
+        (signed(summary["average_60"]), "60 天平均 Return",
          any_day(normal["average_60"], signed(normal["average_60"]))),
-        (signed(summary["average_250"]), "Average return 1 year later",
+        (signed(summary["average_250"]), "1 年平均 Return",
          any_day(normal["average_250"], signed(normal["average_250"]))),
         ("—" if summary["average_low"] is None else f"{summary['average_low']:.1f}%",
-         "Avg. further fall in 60 days",
+         "60 天内平均再跌",
          any_day(normal["average_low"], f"{normal['average_low']:.1f}%" if normal["average_low"] is not None else "")),
+        ("—" if median_recovery is None else f"{median_recovery:,.0f} 天", "回本天数中位数",
+         f"{summary['unrecovered']} 次尚未回本" if summary["unrecovered"] else "全部已回本"),
     ]
-    gap = 0.18
+    gap = 0.16
     stat_width = (CARD_WIDTH - 2 * MARGIN - gap * (len(stats) - 1)) / len(stats)
     for i, (value, caption, normal_text) in enumerate(stats):
         draw_stat(ax, font, MARGIN + i * (stat_width + gap), stat_width, value, caption, normal_text)
@@ -452,8 +481,7 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
     latest_index = summary["latest"]["index"] if summary["latest"] else None
     y = tables_top
     for title, panel_events in panels:
-        y += draw_panel(ax, font, y, f"{title}  ·  {plural(len(panel_events), 'EVENT')}",
-                        panel_events, latest_index) + PANEL_GAP
+        y += draw_panel(ax, font, y, f"{title}  ·  {len(panel_events)} 次", panel_events, latest_index) + PANEL_GAP
 
     y += 0.30 - PANEL_GAP + 0.20
     for headline, detail in notes:
@@ -466,13 +494,13 @@ def draw_card(symbol, meta, dates, threshold, events, classified, summary, out_p
 
     footer_y = height - FOOTER_HEIGHT + 0.36
     ax.plot([MARGIN, CARD_WIDTH - MARGIN], [footer_y - 0.24] * 2, color=RULE, linewidth=1)
-    source = ("Yahoo Finance adjusted closes; earnings dates: Nasdaq. Returns from the close of the drop day, "
-              "in trading days (1Y = 250). Any day = buying at every close since the first.")
+    source = ("数据：Yahoo Finance 复权收盘价；财报日期：Nasdaq。Return 从大跌当天收盘起算，按交易日计（1Y = 250 天）；"
+              "回本 = 收盘重回大跌前一天的价格；任意一天 = 历史上每个交易日收盘买入。")
     if not classified:
-        source = ("Yahoo Finance adjusted closes (earnings calendar unavailable). Returns from the close of the "
-                  "drop day, in trading days (1Y = 250).")
+        source = ("数据：Yahoo Finance 复权收盘价（财报日历暂不可用）。Return 从大跌当天收盘起算，按交易日计（1Y = 250 天）；"
+                  "回本 = 收盘重回大跌前一天的价格。")
     label(ax, MARGIN, footer_y, source, font(9.5), MUTED, max_width=CARD_WIDTH - 2 * MARGIN)
-    label(ax, MARGIN, footer_y + 0.30, "Past results do not guarantee future returns.", font(9.5, bold=True), RED)
+    label(ax, MARGIN, footer_y + 0.30, "历史表现不代表未来收益。", font(9.5, bold=True), RED)
     return save(fig, out_path)
 
 
@@ -525,7 +553,7 @@ def main(argv=None):
     if DRY_RUN or not token:
         print(f"[dry run] rendered {chart}")
         return
-    reply({"embeds": [{"description": f"Buy the dip? · {normalise_symbol(symbol)}", "color": 15105570,
+    reply({"embeds": [{"description": f"Buy the dip 回测 · {normalise_symbol(symbol)}", "color": 15105570,
                        "image": {"url": f"attachment://{chart.name}"}}],
            "allowed_mentions": {"parse": []}},
           file=(chart.name, chart.read_bytes()))

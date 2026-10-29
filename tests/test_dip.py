@@ -94,6 +94,31 @@ class FurtherFallAndBaselineTest(unittest.TestCase):
         self.assertEqual([e["index"] for e in dip.clustered(events)], [4])
 
 
+class RecoveryTest(unittest.TestCase):
+    def test_days_until_the_close_before_the_drop_is_regained(self):
+        # From 100 down 10% to 90, then 92.7, 95.5, 98.3, 101.3: back above 100 on the fourth day.
+        dates, closes = series(*([0, -10] + [3] * 6))
+        (event,) = dip.find_drops(dates, closes, 8)
+        self.assertEqual(event["recovery"], 4)
+
+    def test_equal_counts_as_recovered(self):
+        dates, closes = series(-10)
+        closes.append(100.0)
+        self.assertEqual(dip.recovery_days(closes, 1), 1)
+
+    def test_not_recovered_yet(self):
+        dates, closes = series(*([-10] + [0.1] * 20))
+        self.assertIsNone(dip.find_drops(dates, closes, 8)[0]["recovery"])
+
+    def test_median_and_unrecovered_count(self):
+        self.assertEqual(dip.median([5, 1, 3]), 3)
+        self.assertEqual(dip.median([4, 1, 3, 2]), 2.5)
+        self.assertIsNone(dip.median([]))
+        dates, closes = series(*([-10, 15] + [0] * 5 + [-10]))
+        summary = dip.summarise(dip.find_drops(dates, closes, 8), dates, closes)
+        self.assertEqual((summary["median_recovery"], summary["unrecovered"]), (1, 1))
+
+
 class ChooseThresholdTest(unittest.TestCase):
     def test_default_when_the_count_is_readable(self):
         dates, closes = series(*([-9, 9] * 6))
@@ -187,16 +212,16 @@ class SummaryTest(unittest.TestCase):
         events[0]["earnings"] = None
         notes = dip.build_notes(dip.summarise(events, dates, closes), "XYZ", events)
         headlines = [h for h, _ in notes]
-        self.assertIn("1 of 2 were lower 60 trading days later", headlines)
-        self.assertTrue(any(h.startswith("Biggest drop: -10.00%") for h in headlines))
-        self.assertTrue(notes[-1][1].startswith("* Before 2008"))
+        self.assertIn("2 次中有 1 次在 60 个交易日后仍低于大跌当天收盘", headlines)
+        self.assertTrue(any(h.startswith("最大单日跌幅：-10.00%") for h in headlines))
+        self.assertTrue(notes[-1][1].startswith("* 2008 年以前没有财报日历"))
 
     def test_cluster_note(self):
         moves = [-10, 0, -9] + [1] * 70
         dates, closes = series(*moves)
         events = dip.find_drops(dates, closes, 8)
         notes = dip.build_notes(dip.summarise(events, dates, closes), "XYZ", events)
-        self.assertTrue(any("1 drop came within 5 trading days" in detail for _, detail in notes))
+        self.assertTrue(any("有 1 次大跌发生在前一次的 5 个交易日之内" in detail for _, detail in notes))
 
     def test_summary_includes_the_new_figures(self):
         dates, closes = series(*([-10] + [0.2] * 300))
@@ -205,10 +230,9 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summary["average_low"], 0.0)
         self.assertIsNotNone(summary["baseline"]["win_rate"])
 
-    def test_plural(self):
-        self.assertEqual(dip.plural(1, "EVENT"), "1 EVENT")
-        self.assertEqual(dip.plural(8, "EVENT"), "8 EVENTS")
-        self.assertEqual(dip.plural(2, "earlier event"), "2 earlier events")
+    def test_latest_drop_rank_wording(self):
+        self.assertEqual(dip.rank_text(1), "最大")
+        self.assertEqual(dip.rank_text(3), "第 3 大")
 
 
 class MainTest(unittest.TestCase):
