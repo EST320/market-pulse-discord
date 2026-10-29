@@ -52,11 +52,12 @@ OUTPUT_FILE = Path("dip.png")
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 HORIZONS = (1, 20, 60)
 DEFAULT_THRESHOLD = 8.0
-# Without an explicit threshold, the default is moved until the study has a
-# readable number of events: volatile stocks fall 8% far too often, steady
-# ones almost never.
-AUTO_THRESHOLDS = (5, 6, 7, 8, 10, 12, 15, 20, 25, 30)
-MIN_EVENTS, MAX_EVENTS = 4, 24
+# Without an explicit threshold the study stays at 8% even for volatile
+# stocks: raising it would leave only the largest crashes, which for older
+# listings all date from the dot-com era. The tables then show the most
+# recent events. Only a steady stock with almost no 8% days gets a lower one.
+LOWER_THRESHOLDS = (7, 6, 5)
+MIN_EVENTS = 4
 MAX_ROWS_PER_PANEL = 12
 
 # Tickers that changed over the years, so that old earnings dates still match.
@@ -131,23 +132,16 @@ def find_drops(dates, closes, threshold):
 
 
 def choose_threshold(dates, closes, requested=None):
-    """The requested threshold, or the default moved until the event count is readable."""
+    """The requested threshold; otherwise 8%, lowered only if that finds almost nothing."""
     if requested is not None:
         return float(requested), find_drops(dates, closes, float(requested))
 
-    events = find_drops(dates, closes, DEFAULT_THRESHOLD)
-    if MIN_EVENTS <= len(events) <= MAX_EVENTS:
-        return DEFAULT_THRESHOLD, events
-    if len(events) > MAX_EVENTS:
-        candidates = [t for t in AUTO_THRESHOLDS if t > DEFAULT_THRESHOLD]
-    else:
-        candidates = [t for t in reversed(AUTO_THRESHOLDS) if t < DEFAULT_THRESHOLD]
-    for threshold in candidates:
-        events = find_drops(dates, closes, threshold)
-        if MIN_EVENTS <= len(events) <= MAX_EVENTS:
-            return float(threshold), events
-    # Nothing lands in range: take the last candidate tried (the closest to range).
-    return float(candidates[-1]) if candidates else DEFAULT_THRESHOLD, events
+    threshold, events = DEFAULT_THRESHOLD, find_drops(dates, closes, DEFAULT_THRESHOLD)
+    for lower in LOWER_THRESHOLDS:
+        if len(events) >= MIN_EVENTS:
+            break
+        threshold, events = float(lower), find_drops(dates, closes, lower)
+    return threshold, events
 
 
 def fetch_calendars(days):
@@ -279,7 +273,8 @@ def draw_panel(ax, font, x, width, height, title, events, latest_index):
     shown = events[-MAX_ROWS_PER_PANEL:]
     y = PANEL_TOP + PANEL_HEAD + ROW_HEIGHT / 2
     if len(events) > len(shown):
-        label(ax, left, y - 0.02, f"{plural(len(events) - len(shown), 'earlier event')} not shown", font(10), MUTED)
+        label(ax, left, y - 0.02, f"Most recent {len(shown)} shown · {plural(len(events) - len(shown), 'earlier event')} "
+              "counted in the figures above", font(10), MUTED, max_width=right - left)
         y += ROW_HEIGHT
     if not events:
         label(ax, x + width / 2, y, "None", font(12), MUTED, ha="center")
@@ -294,7 +289,7 @@ def draw_panel(ax, font, x, width, height, title, events, latest_index):
         date_text = event["date"].isoformat() + ("*" if event.get("earnings", False) is None else "")
         label(ax, left, y, date_text, date_font, AMBER if is_latest else TEXT)
         if is_latest:
-            label(ax, left + text_width(event["date"].isoformat(), date_font) + 0.14, y, "LATEST",
+            label(ax, left + text_width(date_text, date_font) + 0.14, y, "LATEST",
                   font(9, bold=True), AMBER)
         label(ax, columns[0][1], y, f"{event['change']:.2f}%", font(13, bold=True), RED, ha="right")
         for (name, cx), horizon in zip(columns[1:], HORIZONS):
@@ -314,7 +309,8 @@ def build_notes(summary, symbol, events=()):
     losers = summary["losers"]
     if summary["finished"]:
         if losers:
-            dates = ", ".join(e["date"].isoformat() for e in losers[:6]) + ("…" if len(losers) > 6 else "")
+            # The most recent ones, like the tables.
+            dates = ("…, " if len(losers) > 6 else "") + ", ".join(e["date"].isoformat() for e in losers[-6:])
             notes.append((f"{len(losers)} of {summary['finished']} were lower 60 trading days later",
                           dates))
         else:

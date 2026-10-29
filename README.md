@@ -163,8 +163,8 @@ Each workflow checks out `main` for the code and the [`state`](https://github.co
 
 - Prices are Yahoo Finance adjusted daily closes from the first trading day, so splits and dividends do not create false drops. Returns run from the close of the drop day.
 - A drop counts as earnings-related when the company reported before the open that day or after the close the trading day before, according to Nasdaq's historical earnings calendar. That calendar starts in January 2008; earlier drops are marked with an asterisk and left unclassified.
-- Without a threshold the study starts at 8% and moves it (between 5% and 30%) until it finds 4 to 24 events, since a volatile stock falls 8% far more often than a steady one. A given threshold is used as is.
-- The four headline figures count every event; the tables show up to 12 per side, most recent first.
+- Without a threshold the study uses 8%, as in the original, and lowers it towards 5% only for a steady stock that has almost no 8% days. It is never raised for volatile stocks: that would leave only their largest crashes, which for listings such as Amazon all date from the dot-com era. A given threshold is used as is.
+- The four headline figures count every event since the first trading day; each table shows its 12 most recent and says how many earlier ones are counted but not listed.
 - Unknown tickers and stocks without a qualifying drop get a short text reply instead of an image.
 
 ### `/market`

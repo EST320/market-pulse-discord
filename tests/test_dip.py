@@ -62,17 +62,21 @@ class ChooseThresholdTest(unittest.TestCase):
         threshold, events = dip.choose_threshold(dates, closes)
         self.assertEqual((threshold, len(events)), (8.0, 6))
 
-    def test_raised_for_volatile_stocks(self):
+    def test_kept_at_eight_for_volatile_stocks(self):
+        # Raising it would leave only the oldest crashes; the tables show the recent ones instead.
         dates, closes = series(*([-9, 9] * 30 + [-13, 13] * 5))
         threshold, events = dip.choose_threshold(dates, closes)
-        self.assertGreater(threshold, 8)
-        self.assertLessEqual(len(events), dip.MAX_EVENTS)
+        self.assertEqual((threshold, len(events)), (8.0, 35))
 
     def test_lowered_for_steady_stocks(self):
         dates, closes = series(*([-6, 6] * 5))
         threshold, events = dip.choose_threshold(dates, closes)
-        self.assertLess(threshold, 8)
-        self.assertGreaterEqual(len(events), dip.MIN_EVENTS)
+        self.assertEqual((threshold, len(events)), (6.0, 5))
+
+    def test_lowered_no_further_than_five(self):
+        dates, closes = series(*([-1, 1] * 5))
+        threshold, events = dip.choose_threshold(dates, closes)
+        self.assertEqual((threshold, events), (5.0, []))
 
     def test_an_explicit_threshold_is_kept(self):
         dates, closes = series(*([-9, 9] * 30))

@@ -29,7 +29,7 @@ COMMANDS = [
             },
             {
                 "name": "threshold",
-                "description": "单日跌幅阈值（%），不填则默认 8%，并按股票波动自动调整",
+                "description": "单日跌幅阈值（%），不填默认 8%",
                 "type": 10,  # number
                 "required": False,
                 "min_value": 1,
