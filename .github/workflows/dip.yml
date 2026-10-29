@@ -1,0 +1,91 @@
+name: Dip Study on Demand
+
+# Started by the Cloudflare Worker in bot/worker.js when someone uses the
+# /dip slash command. Draws the drop study for one stock and fills in the
+# command's "thinking..." placeholder with it.
+on:
+  workflow_dispatch:
+    inputs:
+      application_id:
+        description: "Discord application ID (sent by the bot)"
+        required: true
+        type: string
+      interaction_token:
+        description: "Discord interaction token (sent by the bot)"
+        required: true
+        type: string
+      symbol:
+        description: "US stock ticker"
+        required: true
+        type: string
+      threshold:
+        description: "Single-day drop threshold in percent; empty for automatic"
+        required: false
+        type: string
+  # A change to the study triggers a dry run for one stock: fetch and render,
+  # post nothing. Its data sources need no key and have no quota.
+  push:
+    branches: [main]
+    paths:
+      - "market_pulse/dip.py"
+      - "market_pulse/nasdaq.py"
+      - "market_pulse/theme.py"
+      - ".github/workflows/dip.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Inputs are read from the event file rather than written into a
+      # command, so the token never appears in this public repository's
+      # logs, and nothing typed in Discord is ever run as shell code.
+      - name: Load the interaction
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          token=$(jq -r '.inputs.interaction_token' "$GITHUB_EVENT_PATH")
+          echo "::add-mask::$token"
+          echo "INTERACTION_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "DISCORD_APPLICATION_ID=$(jq -r '.inputs.application_id' "$GITHUB_EVENT_PATH")" >> "$GITHUB_ENV"
+          echo "SYMBOL=$(jq -r '.inputs.symbol' "$GITHUB_EVENT_PATH" | tr -cd 'A-Za-z0-9.-')" >> "$GITHUB_ENV"
+          echo "THRESHOLD=$(jq -r '.inputs.threshold // ""' "$GITHUB_EVENT_PATH" | tr -cd '0-9.')" >> "$GITHUB_ENV"
+
+      - name: Dry-run settings
+        if: github.event_name == 'push'
+        run: |
+          echo "DRY_RUN=true" >> "$GITHUB_ENV"
+          echo "SYMBOL=GOOGL" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/market_close.txt
+
+      # The chart shares the other images' typeface, which needs a CJK font.
+      - name: Install chart font
+        run: |
+          sudo apt-get install -y -qq fonts-noto-cjk \
+            || (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk)
+
+      - name: Install dependencies
+        run: pip install -r requirements/market_close.txt
+
+      - name: Draw the study and reply
+        run: python -m market_pulse.dip
+
+      - name: Tell the user if it failed
+        if: failure() && github.event_name == 'workflow_dispatch'
+        run: |
+          curl -sS -X PATCH \
+            -H "Content-Type: application/json" \
+            -d '{"content": "生成失败，请稍后再试。"}' \
+            "https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${INTERACTION_TOKEN}/messages/@original" \
+            > /dev/null

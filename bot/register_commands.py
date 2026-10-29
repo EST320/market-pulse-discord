@@ -16,6 +16,27 @@ COMMANDS = [
         "description": "当前美股行情总结：指数、板块、利率、商品、加密",
         "type": 1,  # slash command
     },
+    {
+        "name": "dip",
+        "description": "抄底回测：某只股票上市以来的单日大跌，以及之后 1 / 20 / 60 个交易日的表现",
+        "type": 1,
+        "options": [
+            {
+                "name": "symbol",
+                "description": "美股代码，例如 GOOGL",
+                "type": 3,  # string
+                "required": True,
+            },
+            {
+                "name": "threshold",
+                "description": "单日跌幅阈值（%），不填则默认 8%，并按股票波动自动调整",
+                "type": 10,  # number
+                "required": False,
+                "min_value": 1,
+                "max_value": 50,
+            },
+        ],
+    },
 ]
 
 

@@ -65,6 +65,8 @@ market-pulse-discord/
 │   ├── market-close.yml                      # Daily US market close summary
 │   ├── backfill.yml                          # Manual backfill
 │   ├── market-now.yml                        # /market slash command: summary on demand
+│   ├── dip.yml                               # /dip slash command: drop study for one stock
+│   ├── register-commands.yml                 # Registers the slash commands after a change
 │   └── tests.yml                             # Unit tests on code changes
 ├── market_pulse/
 │   ├── wallstreetcn.py                       # One module, three channels
@@ -74,6 +76,7 @@ market-pulse-discord/
 │   ├── earnings_calendar.py
 │   ├── ipo_calendar.py
 │   ├── market_close.py
+│   ├── dip.py                                # Drop study behind /dip
 │   ├── discord.py                            # Shared webhook client with bounded 429 retries
 │   ├── nasdaq.py                             # Client for Nasdaq's public calendar API
 │   ├── yahoo.py                              # 20-day average dollar volume from Yahoo Finance
@@ -147,9 +150,27 @@ Each workflow checks out `main` for the code and the [`state`](https://github.co
 - **Cost.** There is no state history to look back through; the Actions run logs are the record of what each run did.
 - **Next step.** If this grows further, state moves to SQLite or a key-value store.
 
-## Slash command: `/market`
+## Slash commands
 
-Typing `/market` in Discord returns the same image as the market close post, drawn from current data and labelled with the session status (in session with the New York time, closed, or showing the previous session before the open and on weekends and holidays).
+| Command | Reply |
+|---|---|
+| `/market` | The market summary image, drawn from current data |
+| `/dip symbol:GOOGL [threshold:8]` | A drop study for one stock: every single-day fall of the threshold or more since its first trading day, and its return 1, 20 and 60 trading days later, split into drops on an earnings release and the rest |
+
+![Drop study for GOOGL: every single-day drop of 8% or more, split into earnings-related and other, with 1, 20 and 60 day returns](docs/screenshots/dip-study.png)
+
+### `/dip`
+
+- Prices are Yahoo Finance adjusted daily closes from the first trading day, so splits and dividends do not create false drops. Returns run from the close of the drop day.
+- A drop counts as earnings-related when the company reported before the open that day or after the close the trading day before, according to Nasdaq's historical earnings calendar. That calendar starts in January 2008; earlier drops are marked with an asterisk and left unclassified.
+- Without a threshold the study starts at 8% and moves it (between 5% and 30%) until it finds 4 to 24 events, since a volatile stock falls 8% far more often than a steady one. A given threshold is used as is.
+- The four headline figures count every event; the tables show up to 12 per side, most recent first.
+- Unknown tickers and stocks without a qualifying drop get a short text reply instead of an image.
+
+### `/market`
+
+
+It returns the same image as the market close post, drawn from current data and labelled with the session status (in session with the New York time, closed, or showing the previous session before the open and on weekends and holidays).
 
 Everything else here only pushes messages out through webhooks. A command is a request coming in, so something has to be listening for it:
 
@@ -166,7 +187,7 @@ The reply takes roughly half a minute to a minute, almost all of it the runner s
 Setup:
 
 1. Create an application in the Discord Developer Portal, add a bot to it, and invite it to the server with the `applications.commands` scope.
-2. Register the command once by running `bot/register_commands.py` with `DISCORD_APPLICATION_ID` and `DISCORD_BOT_TOKEN` in the environment. The bot token is needed only for this step and is not stored anywhere in the project.
+2. Add the repository secrets `DISCORD_APPLICATION_ID` and `DISCORD_BOT_TOKEN`, then run the **Register Discord Commands** workflow. Run it again whenever a command is added or changed in `bot/register_commands.py`.
 3. Create a Cloudflare Worker from this repository (Workers & Pages → Create → import a repository) with **`bot` as the root directory** and preview builds turned off; `bot/wrangler.toml` supplies the rest, and later pushes redeploy it. Then add its secrets `DISCORD_PUBLIC_KEY` and `GITHUB_TOKEN` (a fine-grained token with Actions read and write on this repository), and optionally a text variable `ALLOWED_GUILD_ID` to restrict the command to one server.
 4. Put the Worker's URL in the application's **Interactions Endpoint URL**. Discord checks the signature handling before accepting it.
 

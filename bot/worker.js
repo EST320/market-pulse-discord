@@ -1,11 +1,12 @@
-// Cloudflare Worker: the always-on front door for the /market slash command.
+// Cloudflare Worker: the always-on front door for the bot's slash commands,
+// /market and /dip.
 //
 // Discord sends every slash command to this URL and expects an answer within
 // three seconds, which is far less than drawing the chart takes. So the worker
 // only does three things:
 //   1. checks that the request really comes from Discord (Ed25519 signature),
 //   2. answers with a "thinking..." placeholder,
-//   3. starts the market-now.yml GitHub Actions workflow, which draws the
+//   3. starts the GitHub Actions workflow for the command, which draws the
 //      chart and fills the placeholder in.
 //
 // Settings (Worker -> Settings -> Variables and Secrets):
@@ -21,7 +22,30 @@ const MESSAGE = 4;
 const DEFERRED_MESSAGE = 5;
 const EPHEMERAL = 64;
 
-const WORKFLOW = "market-now.yml";
+// Command name -> workflow file, and a function turning the command's options
+// into workflow inputs (or into an error message for the user).
+const COMMANDS = {
+  market: { workflow: "market-now.yml", inputs: () => ({}) },
+  dip: { workflow: "dip.yml", inputs: dipInputs },
+};
+
+const SYMBOL = /^[A-Z0-9][A-Z0-9.\-]{0,9}$/;
+
+function option(interaction, name) {
+  return (interaction.data?.options || []).find((o) => o.name === name)?.value;
+}
+
+function dipInputs(interaction) {
+  const symbol = String(option(interaction, "symbol") || "").trim().toUpperCase().replace("/", "-");
+  if (!SYMBOL.test(symbol)) {
+    return { error: `“${symbol}” 不是有效的股票代码。` };
+  }
+  const threshold = option(interaction, "threshold");
+  if (threshold !== undefined && !(threshold >= 1 && threshold <= 50)) {
+    return { error: "跌幅阈值需要在 1 到 50 之间。" };
+  }
+  return { symbol, threshold: threshold === undefined ? "" : String(threshold) };
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -42,12 +66,17 @@ export default {
       return json({ type: PONG });
     }
 
-    if (interaction.type === APPLICATION_COMMAND && interaction.data?.name === "market") {
+    const command = interaction.type === APPLICATION_COMMAND ? COMMANDS[interaction.data?.name] : undefined;
+    if (command) {
       if (env.ALLOWED_GUILD_ID && interaction.guild_id !== env.ALLOWED_GUILD_ID) {
         return reply("这个命令只能在指定的服务器里使用。");
       }
+      const inputs = command.inputs(interaction);
+      if (inputs.error) {
+        return reply(inputs.error);
+      }
       // Keep working after the response has been sent.
-      ctx.waitUntil(startWorkflow(env, interaction));
+      ctx.waitUntil(startWorkflow(env, interaction, command.workflow, inputs));
       return json({ type: DEFERRED_MESSAGE });
     }
 
@@ -83,11 +112,11 @@ async function isFromDiscord(publicKeyHex, signatureHex, message) {
   }
 }
 
-async function startWorkflow(env, interaction) {
+async function startWorkflow(env, interaction, workflow, extraInputs) {
   let problem = null;
   try {
     const response = await fetch(
-      `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${WORKFLOW}/dispatches`,
+      `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${workflow}/dispatches`,
       {
         method: "POST",
         headers: {
@@ -99,6 +128,7 @@ async function startWorkflow(env, interaction) {
         body: JSON.stringify({
           ref: "main",
           inputs: {
+            ...extraInputs,
             application_id: interaction.application_id,
             interaction_token: interaction.token,
           },
