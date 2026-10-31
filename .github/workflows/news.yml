@@ -5,7 +5,12 @@ on:
 
 concurrency:
   group: wallstreetcn-us-stock
-  cancel-in-progress: false
+  # A newer run replaces an older one that is still queued or running.
+  # Runs normally finish in seconds, so this only bites when GitHub leaves
+  # a run stuck in the queue; waiting behind it instead would cancel every
+  # later run (as happened on 2026-10-31, when one stuck run blocked the
+  # tracker for ten hours).
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -13,6 +18,7 @@ permissions:
 jobs:
   post-live:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
