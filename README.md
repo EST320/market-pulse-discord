@@ -46,9 +46,9 @@ flowchart LR
     discord --> commit[Save state to the state branch]
 ```
 
-1. **Incremental fetch.** Page through the source by cursor and stop at the first already-seen item or the first page that falls outside the age window. No full scans.
+1. **Incremental fetch.** Page through the source by cursor until a page reaches past the age window. No full scans.
 2. **Dedup.** Compare item IDs against the state file. The Truth Social archive can return the same post under different IDs, so that tracker adds a second layer keyed on a hash of the content.
-3. **Age filter.** Skip items that are too old or have no timestamp (15 minutes for flash news, 12 hours for Truth Social), so historical content is never pushed by accident.
+3. **Age filter.** Skip items that are too old or have no timestamp (3 hours for flash news, 12 hours for Truth Social), so historical content is never pushed by accident.
 4. **Format.** Translate with DeepL, render images with Pillow / Matplotlib, and build the Discord embed.
 5. **Deliver.** Post through a Discord webhook. An item is written to state **only after it has been delivered**, so a failure midway neither repeats what was sent nor loses what wasn't.
 6. **Persist.** The workflow saves the state file to the `state` branch for the next run to read.
@@ -219,6 +219,8 @@ Only `truth_social` uses `hashes` and `etag`. `seen_feargreed.json` instead stor
 - Covers the US, A-share and HK channels through `api-one-wscn.awtmt.com`, the API domain the Wallstreetcn web frontend currently uses.
 - One module serves all three; the channel is a command-line argument (`us`, `a` or `hk`) and per-channel settings live in the `CHANNELS` table.
 - Each run reads at most 10 pages and sends at most 100 items.
+- Items sometimes reach the feed well after their display time. Measured over 12 hours, most arrived within two minutes, a few took 9 to 13 minutes, and about 1% took longer than the 15 minutes the age window used to be, so they were never sent. The window is now 3 hours and the whole window is read on every run; items already sent are recognised by ID, so nothing is sent twice.
+- Only the US, A-share and HK channels are covered. Wallstreetcn's main feed also carries forex, bond, financing, oil, gold and other commodity items that belong to none of them: about 59% of the main feed over a recent 24 hours.
 
 ### Truth Social
 

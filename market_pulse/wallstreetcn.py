@@ -30,7 +30,13 @@ MAX_SEND_PER_RUN = 100
 FIRST_RUN_SEND = 10
 DISCORD_DELAY_SECONDS = 0.55
 RETENTION_SECONDS = 12 * 3600
-MAX_NEWS_AGE_SECONDS = 15 * 60
+# Items sometimes reach the feed long after their display time: measured over
+# 12 hours, most arrived within two minutes but a few took 9 to 13 minutes,
+# and about 1% took longer than the 15-minute window this used to be, which
+# dropped them for good. Dedup is by ID, so a wide window only costs a longer
+# look-back. It must stay well inside RETENTION_SECONDS, or an old item that
+# was already sent would be forgotten and sent again.
+MAX_NEWS_AGE_SECONDS = 3 * 3600
 API_MAX_RETRIES = 3
 API_RETRY_BACKOFF_SECONDS = 3
 
@@ -205,9 +211,9 @@ def collect_new_items(channel, seen_ids):
             if news["id"] not in seen_ids:
                 collected[news["id"]] = news
 
-        if any(n["id"] in seen_ids for n in page_news):
-            break
-
+        # No early stop at the first seen item: an item that surfaces late sits
+        # at its (older) display-time position, possibly behind seen items, so
+        # the whole window has to be read.
         # The oldest item on this page is already outside the age window; later
         # pages are only older, so there is no point requesting them.
         oldest_ts = min(

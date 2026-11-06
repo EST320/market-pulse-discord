@@ -84,11 +84,26 @@ class CollectNewItemsTest(unittest.TestCase):
         result = self.collect({"2"}, [raw(3, 10), untimed, raw(2, 20), stale])
         self.assertEqual([n["id"] for n in result], ["3"])
 
-    def test_stops_paging_at_seen_item(self):
-        fake = mock.Mock(side_effect=pages([raw(3, 10), raw(2, 20)], [raw(1, 30)]))
+    def test_an_item_that_surfaces_late_is_still_collected(self):
+        # Displayed 40 minutes ago, first seen now: the old 15-minute window dropped it.
+        result = self.collect({"2"}, [raw(3, 10), raw(2, 20), raw(1, 40 * 60)])
+        self.assertEqual([n["id"] for n in result], ["1", "3"])
+
+    def test_keeps_paging_past_seen_items_until_the_window_edge(self):
+        inside, outside = w.MAX_NEWS_AGE_SECONDS - 60, w.MAX_NEWS_AGE_SECONDS + 60
+        fake = mock.Mock(side_effect=pages(
+            [raw(3, 10), raw(2, 20)],
+            [raw(1, inside), raw(0, outside)],
+            [raw(-1, outside + 60)],
+        ))
         with mock.patch.object(w, "fetch_page", fake):
-            w.collect_new_items(US, {"2"})
-        self.assertEqual(fake.call_count, 1)
+            result = w.collect_new_items(US, {"2"})
+        self.assertEqual([n["id"] for n in result], ["1", "3"])
+        self.assertEqual(fake.call_count, 2)
+
+    def test_the_window_stays_well_inside_the_retention(self):
+        # Otherwise an item already sent could drop out of the state and be sent again.
+        self.assertGreaterEqual(w.RETENTION_SECONDS, 2 * w.MAX_NEWS_AGE_SECONDS)
 
     def test_stops_paging_past_age_window(self):
         stale = raw(1, w.MAX_NEWS_AGE_SECONDS + 60)
