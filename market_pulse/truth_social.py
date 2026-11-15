@@ -1054,5 +1054,30 @@ def main():
     print(f"Found {len(new_posts)} new post(s), sent {sent_count}.")
 
 
+CHECK_SAMPLE = (
+    "What's driving up Gasoline is no longer the Strait of Hormuz, because Record Numbers "
+    "of Barrels are coming out. The Dumocrats are closing our refineries! President DONALD J. TRUMP"
+)
+
+
+def check_translation():
+    """Run every translation backend on a sample and print the result.
+
+    Sends nothing to Discord and touches no state; used to verify API keys.
+    """
+    working = 0
+    for name, translate in TRANSLATORS:
+        result = translate(CHECK_SAMPLE)
+        print(f"[{name}] {'OK: ' + result if result else 'no result (not configured or failed)'}")
+        working += bool(result)
+    if not working:
+        raise SystemExit("No translation backend produced a translation.")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if "--check-translation" in sys.argv:
+        check_translation()
+    else:
+        main()
