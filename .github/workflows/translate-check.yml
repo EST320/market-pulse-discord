@@ -2,9 +2,6 @@ name: Check Truth Social translation backends
 
 on:
   workflow_dispatch:
-  push:  # TEMPORARY: lets the self-check run from the dev branch; remove before merging
-    branches: [claude/wonderful-einstein-30k3o2]
-    paths: [.github/workflows/translate-check.yml, market_pulse/truth_social.py]
 
 permissions:
   contents: read
