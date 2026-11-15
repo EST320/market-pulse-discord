@@ -254,6 +254,7 @@ class TranslateTextTest(unittest.TestCase):
         for p in (
             mock.patch.object(ts, "get_translator", return_value=self.translator),
             mock.patch.object(ts, "TRANSLATORS", [("deepl", ts.translate_deepl)]),
+            mock.patch.object(ts, "_DISABLED", set()),
             mock.patch.dict("os.environ", {ts.DEEPL_KEY_ENV: "key"}),
             mock.patch.object(ts.time, "sleep"),
         ):
@@ -295,7 +296,7 @@ class TranslateTextTest(unittest.TestCase):
 
 class TranslatorChainTest(unittest.TestCase):
     def setUp(self):
-        for p in (mock.patch.object(ts.time, "sleep"),):
+        for p in (mock.patch.object(ts.time, "sleep"), mock.patch.object(ts, "_DISABLED", set())):
             p.start()
             self.addCleanup(p.stop)
         redirect = redirect_stdout(io.StringIO())
@@ -307,6 +308,13 @@ class TranslatorChainTest(unittest.TestCase):
         with mock.patch.object(ts, "TRANSLATORS", chain):
             self.assertEqual(ts.translate_text("Good"), "好")
         chain[2][1].assert_not_called()
+
+    def test_a_failed_backend_is_skipped_for_the_rest_of_the_run(self):
+        first = mock.Mock(return_value=None)
+        with mock.patch.object(ts, "TRANSLATORS", [("google", first), ("b", lambda body: "好")]):
+            ts.translate_text("Good one")
+            ts.translate_text("Good two")
+        self.assertEqual(first.call_count, 1)
 
     def test_all_backends_failing_returns_none(self):
         with mock.patch.object(ts, "TRANSLATORS", [("a", lambda body: None), ("b", lambda body: "English")]):

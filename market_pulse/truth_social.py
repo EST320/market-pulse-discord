@@ -39,6 +39,8 @@ GEMINI_MODEL_ENV = "GEMINI_MODEL"
 # Tried in order on a 404 (Google retires models; the "-latest" alias outlives them).
 GEMINI_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-flash-latest")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_TIMEOUT = 20
+GEMINI_ATTEMPTS = 2
 GOOGLE_FREE_URL = "https://translate.googleapis.com/translate_a/single"
 
 STATE_FILE = STATE_DIR / "seen_trump.json"
@@ -375,24 +377,25 @@ GEMINI_SYSTEM_PROMPT = (
 )
 
 
-def _retry(name, attempt_once):
+def _retry(name, attempt_once, attempts=None):
     """Run attempt_once up to TRANSLATE_ATTEMPTS times. It returns text, or raises.
 
     Raising PermanentTranslationError stops retrying (bad key, exhausted quota).
     """
-    for attempt in range(1, TRANSLATE_ATTEMPTS + 1):
+    attempts = attempts or TRANSLATE_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         try:
             text = (attempt_once() or "").strip()
             if text and CJK_RE.search(text):
                 return text
-            print(f"{name} returned no Chinese text (attempt {attempt}/{TRANSLATE_ATTEMPTS})")
+            print(f"{name} returned no Chinese text (attempt {attempt}/{attempts})")
         except PermanentTranslationError as exc:
             print(f"{name} unavailable: {exc}")
             return None
         except Exception as exc:
-            print(f"{name} failed (attempt {attempt}/{TRANSLATE_ATTEMPTS}): {type(exc).__name__}: {exc}")
+            print(f"{name} failed (attempt {attempt}/{attempts}): {type(exc).__name__}: {exc}")
 
-        if attempt < TRANSLATE_ATTEMPTS:
+        if attempt < attempts:
             time.sleep(TRANSLATE_BACKOFF_SECONDS * attempt)
     return None
 
@@ -420,7 +423,7 @@ def translate_gemini(body):
                     "contents": [{"role": "user", "parts": [{"text": f"<post>\n{body}\n</post>"}]}],
                     "generationConfig": {"temperature": 0.2},
                 },
-                timeout=45,
+                timeout=GEMINI_TIMEOUT,
             )
             if response.status_code == 404:
                 retired.append(True)  # unknown or retired model: try the next one
@@ -431,7 +434,7 @@ def translate_gemini(body):
             parts = response.json()["candidates"][0]["content"]["parts"]
             return "".join(part.get("text", "") for part in parts)
 
-        result = _retry(f"Gemini ({model})", once)
+        result = _retry(f"Gemini ({model})", once, attempts=GEMINI_ATTEMPTS)
         if result or not retired:
             return result
     return None
@@ -483,6 +486,11 @@ TRANSLATORS = [
 ]
 
 
+# Backends that failed during this run. A slow or down backend is skipped for
+# the remaining posts, so a backlog does not pay its timeouts once per post.
+_DISABLED = set()
+
+
 def translate_text(text):
     """Translate English to Chinese. Returns None when every backend failed.
 
@@ -498,10 +506,15 @@ def translate_text(text):
         return text
 
     for name, translate in TRANSLATORS:
+        if name in _DISABLED:
+            continue
         translated = translate(body)
         if translated and CJK_RE.search(translated):
             print(f"Translated with {name}")
             return "\n".join([translated.strip(), *urls])
+        if os.environ.get({"gemini": GEMINI_KEY_ENV, "deepl": DEEPL_KEY_ENV}.get(name, "")) or name == "google":
+            print(f"{name} failed; skipping it for the rest of this run")
+            _DISABLED.add(name)
 
     return None
 
@@ -1070,11 +1083,52 @@ CHECK_SAMPLE = (
 )
 
 
+def list_gemini_models():
+    key = os.environ.get(GEMINI_KEY_ENV)
+    if not key:
+        return
+    try:
+        response = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": key}, params={"pageSize": 200}, timeout=30,
+        )
+        response.raise_for_status()
+        names = [
+            m["name"].removeprefix("models/") for m in response.json().get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+        ]
+    except Exception as exc:
+        print(f"Could not list Gemini models: {type(exc).__name__}: {exc}")
+        return
+    print("Gemini models with generateContent:", ", ".join(names))
+
+    for name in names:
+        if "flash" not in name or any(x in name for x in ("image", "tts", "live", "audio", "embedding")):
+            continue
+        started = time.time()
+        try:
+            reply = requests.post(
+                GEMINI_URL.format(model=name), headers={"x-goog-api-key": key},
+                json={"systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+                      "contents": [{"role": "user", "parts": [{"text": f"<post>\n{CHECK_SAMPLE}\n</post>"}]}],
+                      "generationConfig": {"temperature": 0.2}},
+                timeout=GEMINI_TIMEOUT,
+            )
+            if reply.status_code == 200:
+                text = "".join(p.get("text", "") for p in reply.json()["candidates"][0]["content"]["parts"])
+                print(f"  {name}: OK in {time.time() - started:.1f}s: {text.strip()[:80]}")
+            else:
+                print(f"  {name}: HTTP {reply.status_code} in {time.time() - started:.1f}s")
+        except Exception as exc:
+            print(f"  {name}: {type(exc).__name__} after {time.time() - started:.1f}s")
+
+
 def check_translation():
     """Run every translation backend on a sample and print the result.
 
     Sends nothing to Discord and touches no state; used to verify API keys.
     """
+    list_gemini_models()
     working = 0
     for name, translate in TRANSLATORS:
         result = translate(CHECK_SAMPLE)
