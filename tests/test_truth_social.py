@@ -166,7 +166,7 @@ class MainEtagTest(unittest.TestCase):
             mock.patch.object(ts, "STATE_FILE", self.state_file),
             mock.patch.object(ts, "post_to_discord", self.posted),
             mock.patch.object(ts.time, "sleep"),
-            mock.patch.dict("os.environ", {ts.WEBHOOK_ENV: "hook", ts.DEEPL_KEY_ENV: "key"}),
+            mock.patch.dict("os.environ", {ts.WEBHOOK_ENV: "hook"}),
         ]
         for p in patches:
             p.start()
@@ -253,6 +253,8 @@ class TranslateTextTest(unittest.TestCase):
         self.translator = mock.Mock()
         for p in (
             mock.patch.object(ts, "get_translator", return_value=self.translator),
+            mock.patch.object(ts, "TRANSLATORS", [("deepl", ts.translate_deepl)]),
+            mock.patch.dict("os.environ", {ts.DEEPL_KEY_ENV: "key"}),
             mock.patch.object(ts.time, "sleep"),
         ):
             p.start()
@@ -289,6 +291,53 @@ class TranslateTextTest(unittest.TestCase):
         self.translator.translate_text.side_effect = ts.deepl.QuotaExceededException("quota")
         self.assertIsNone(ts.translate_text("All good"))
         self.assertEqual(self.translator.translate_text.call_count, 1)
+
+
+class TranslatorChainTest(unittest.TestCase):
+    def setUp(self):
+        for p in (mock.patch.object(ts.time, "sleep"),):
+            p.start()
+            self.addCleanup(p.stop)
+        redirect = redirect_stdout(io.StringIO())
+        redirect.__enter__()
+        self.addCleanup(redirect.__exit__, None, None, None)
+
+    def test_next_backend_is_used_when_the_first_fails(self):
+        chain = [("a", lambda body: None), ("b", lambda body: "好"), ("c", mock.Mock())]
+        with mock.patch.object(ts, "TRANSLATORS", chain):
+            self.assertEqual(ts.translate_text("Good"), "好")
+        chain[2][1].assert_not_called()
+
+    def test_all_backends_failing_returns_none(self):
+        with mock.patch.object(ts, "TRANSLATORS", [("a", lambda body: None), ("b", lambda body: "English")]):
+            self.assertIsNone(ts.translate_text("Good"))
+
+    def test_gemini_is_skipped_without_a_key(self):
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(ts.requests, "post") as post:
+            self.assertIsNone(ts.translate_gemini("Hello"))
+        post.assert_not_called()
+
+    def test_gemini_request_and_response(self):
+        reply = mock.Mock(status_code=200)
+        reply.json.return_value = {"candidates": [{"content": {"parts": [{"text": "你好"}]}}]}
+        with mock.patch.dict("os.environ", {ts.GEMINI_KEY_ENV: "k"}), \
+                mock.patch.object(ts.requests, "post", return_value=reply) as post:
+            self.assertEqual(ts.translate_gemini("Hello"), "你好")
+        self.assertEqual(post.call_args.kwargs["headers"], {"x-goog-api-key": "k"})
+        self.assertIn("<post>\nHello\n</post>", post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"])
+
+    def test_gemini_bad_key_is_not_retried(self):
+        reply = mock.Mock(status_code=403, text="denied")
+        with mock.patch.dict("os.environ", {ts.GEMINI_KEY_ENV: "k"}), \
+                mock.patch.object(ts.requests, "post", return_value=reply) as post:
+            self.assertIsNone(ts.translate_gemini("Hello"))
+        self.assertEqual(post.call_count, 1)
+
+    def test_unofficial_google_segments_are_joined(self):
+        reply = mock.Mock(status_code=200)
+        reply.json.return_value = [[["你好，", "Hello, "], ["世界", "world"]], None, "en"]
+        with mock.patch.object(ts.requests, "post", return_value=reply):
+            self.assertEqual(ts.translate_google_free("Hello, world"), "你好，世界")
 
 
 class MediaParsingTest(unittest.TestCase):

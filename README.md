@@ -49,7 +49,7 @@ flowchart LR
 1. **Incremental fetch.** Page through the source by cursor until a page reaches past the age window. No full scans.
 2. **Dedup.** Compare item IDs against the state file. The Truth Social archive can return the same post under different IDs, so that tracker adds a second layer keyed on a hash of the content.
 3. **Age filter.** Skip items that are too old or have no timestamp (3 hours for flash news, 12 hours for Truth Social), so historical content is never pushed by accident.
-4. **Format.** Translate with DeepL, render images with Pillow / Matplotlib, and build the Discord embed.
+4. **Format.** Translate (Gemini free tier, then DeepL, then Google's keyless endpoint), render images with Pillow / Matplotlib, and build the Discord embed.
 5. **Deliver.** Post through a Discord webhook. An item is written to state **only after it has been delivered**, so a failure midway neither repeats what was sent nor loses what wasn't.
 6. **Persist.** The workflow saves the state file to the `state` branch for the next run to read.
 
