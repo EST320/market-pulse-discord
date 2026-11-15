@@ -51,6 +51,16 @@ class PostWebhookTest(unittest.TestCase):
         self.assertEqual(json.loads(call["data"]["payload_json"]), {"embeds": []})
         self.assertEqual(call["files"]["file"], ("card.png", b"png", "image/png"))
 
+    def test_multiple_files_are_sent_as_numbered_parts_with_guessed_types(self):
+        session = FakeSession(FakeResponse(200))
+        discord.post_webhook(
+            "hook", {"embeds": []},
+            files=[("card.png", b"png"), ("clip.mp4", b"mp4")], session=session,
+        )
+        files = session.calls[0]["files"]
+        self.assertEqual(files["files[0]"], ("card.png", b"png", "image/png"))
+        self.assertEqual(files["files[1]"], ("clip.mp4", b"mp4", "video/mp4"))
+
     def test_file_without_payload(self):
         session = FakeSession(FakeResponse(200))
         discord.post_webhook("hook", file=("table.png", b"png"), session=session)

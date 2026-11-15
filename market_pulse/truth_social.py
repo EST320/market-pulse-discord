@@ -14,6 +14,13 @@ import deepl
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+try:
+    # Impersonates a real browser's TLS handshake. The Truth Social CDN rejects
+    # plain `requests` at the handshake, so this is what makes media downloads work.
+    from curl_cffi import requests as browser_requests
+except ImportError:  # optional: plain requests is still tried as a second transport
+    browser_requests = None
+
 from market_pulse.discord import post_webhook
 from market_pulse.paths import ASSETS_DIR, STATE_DIR
 
@@ -38,6 +45,20 @@ DISCORD_DELAY_SECONDS = 0.8
 MAX_POST_AGE_SECONDS = 12 * 3600
 RETENTION_SECONDS = 30 * 24 * 3600
 SEND_ON_FIRST_RUN = False
+
+# Translation is retried, and a post whose translation keeps failing is held
+# back (not marked as seen) for this long before the English original is sent.
+TRANSLATE_ATTEMPTS = 3
+TRANSLATE_BACKOFF_SECONDS = 2
+TRANSLATION_GRACE_SECONDS = 30 * 60
+TRANSLATION_FALLBACK_NOTE = "（翻译暂不可用，以下为英文原文）\n"
+
+MAX_MEDIA_ITEMS = 4
+MEDIA_TIMEOUT = 30
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+# Discord caps a webhook upload at roughly 10 MB in total; leave room for the card.
+MAX_UPLOAD_BYTES = 9 * 1024 * 1024
+CARD_RESERVE_BYTES = 1024 * 1024
 
 MAX_TRANSLATED_LEN = 4000
 MAX_CARD_TEXT_LEN = 6000
@@ -188,40 +209,63 @@ def clean_html_content(value):
     return text.strip()
 
 
-def get_first_media(item):
-    media = item.get("media")
-    if not isinstance(media, list) or not media:
-        return None
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif")
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".webm", ".m3u8")
 
-    first = media[0]
 
-    if isinstance(first, str):
-        url = first.strip().replace("&amp;", "&")
-        preview_url = None
-    elif isinstance(first, dict):
-        url = str(first.get("url") or "").strip().replace("&amp;", "&")
-        preview_url = str(
-            first.get("preview_url")
-            or first.get("preview")
-            or first.get("thumbnail_url")
-            or ""
-        ).strip().replace("&amp;", "&")
-    else:
-        return None
-
-    if not url:
-        return None
-
+def classify_media(url, hint=""):
+    """Return "image", "video" or "unknown" from the URL extension, then a type hint."""
     path = urlparse(url).path.lower()
+    if path.endswith(IMAGE_EXTENSIONS):
+        return "image"
+    if path.endswith(VIDEO_EXTENSIONS):
+        return "video"
+    hint = (hint or "").lower()
+    if hint in ("image", "photo"):
+        return "image"
+    if hint in ("video", "gifv"):
+        return "video"
+    return "unknown"
 
-    if path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif")):
-        media_type = "image"
-    elif path.endswith((".mp4", ".mov", ".webm", ".m3u8")):
-        media_type = "video"
-    else:
-        media_type = "unknown"
 
-    return {"url": url, "type": media_type, "preview_url": preview_url or None}
+def get_media_items(item):
+    """All attachments of an archive entry, in order, as {url, type, preview_url}."""
+    media = item.get("media")
+    if isinstance(media, (str, dict)):
+        media = [media]
+    if not isinstance(media, list):
+        return []
+
+    items = []
+    for entry in media:
+        if isinstance(entry, str):
+            url, preview_url, hint = entry, "", ""
+        elif isinstance(entry, dict):
+            url = entry.get("url") or entry.get("src") or ""
+            preview_url = (
+                entry.get("preview_url") or entry.get("preview") or entry.get("thumbnail_url") or ""
+            )
+            hint = entry.get("type") or ""
+        else:
+            continue
+
+        url = html.unescape(str(url)).strip()
+        preview_url = html.unescape(str(preview_url)).strip()
+        if not url.startswith("http"):
+            continue
+
+        items.append({
+            "url": url,
+            "type": classify_media(url, str(hint)),
+            "preview_url": preview_url or None,
+        })
+
+    return items
+
+
+def get_first_media(item):
+    items = get_media_items(item)
+    return items[0] if items else None
 
 
 def make_content_hash(content, media):
@@ -241,7 +285,8 @@ def item_to_post(item):
     content = clean_html_content(
         item.get("content") or item.get("text") or item.get("body") or ""
     )
-    media = get_first_media(item)
+    media_items = get_media_items(item)
+    media = media_items[0] if media_items else None
 
     if not content and not media:
         return None
@@ -262,6 +307,7 @@ def item_to_post(item):
         "created_ts": created_ts,
         "timestamp": timestamp,
         "media": media,
+        "media_items": media_items,
         "content_hash": make_content_hash(content, media),
     }
 
@@ -304,25 +350,76 @@ def collect_new_posts(raw_posts, state):
 # DeepL translation (English -> Chinese)
 # ============================================================
 
+URL_RE = re.compile(r"https?://\S+")
+LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+class TranslationDeferred(Exception):
+    """Translation failed on a fresh post: leave it unsent so a later run retries."""
+
+
 def translate_text(text):
+    """Translate English to Chinese. Returns None when translation failed.
+
+    URLs are taken out before translating (DeepL mangles them) and put back on
+    their own line afterwards. Text with nothing to translate is returned as is.
+    """
     if not text or not text.strip():
         return None
 
-    try:
-        result = get_translator().translate_text(text, source_lang="EN", target_lang="ZH")
-        return result.text.strip() or None
-    except deepl.DeepLException as exc:
-        print(f"DeepL translation failed, falling back to the English original: {exc}")
+    urls = URL_RE.findall(text)
+    body = re.sub(r"[ \t]{2,}", " ", URL_RE.sub("", text)).strip()
+    if not LATIN_WORD_RE.search(body):
+        return text
+
+    translated = None
+    for attempt in range(1, TRANSLATE_ATTEMPTS + 1):
+        try:
+            result = get_translator().translate_text(
+                body,
+                source_lang="EN",
+                target_lang="ZH",
+                preserve_formatting=True,
+                model_type="prefer_quality_optimized",
+            )
+            translated = result.text.strip()
+            # DeepL sometimes hands the source back untouched; that is not a translation.
+            if translated and CJK_RE.search(translated):
+                break
+            print(f"DeepL returned no Chinese text (attempt {attempt}/{TRANSLATE_ATTEMPTS})")
+            translated = None
+        except (deepl.AuthorizationException, deepl.QuotaExceededException) as exc:
+            # Retrying cannot fix a bad key or an exhausted monthly quota.
+            print(f"DeepL translation unavailable ({type(exc).__name__}): {exc}")
+            return None
+        except Exception as exc:
+            print(f"DeepL translation failed (attempt {attempt}/{TRANSLATE_ATTEMPTS}): "
+                  f"{type(exc).__name__}: {exc}")
+
+        if attempt < TRANSLATE_ATTEMPTS:
+            time.sleep(TRANSLATE_BACKOFF_SECONDS * attempt)
+
+    if not translated:
         return None
-    except Exception as exc:
-        print(f"Unexpected translation error, falling back to the English original: {exc}")
-        return None
+    return "\n".join([translated, *urls])
 
 
-def build_description(post):
+def build_description(post, now=None):
+    """The Chinese text for the embed.
+
+    Raises TranslationDeferred when translation failed on a post younger than
+    TRANSLATION_GRACE_SECONDS; older posts go out in English with a notice.
+    """
     if post["content"]:
         translated = translate_text(post["content"])
-        return (translated or post["content"])[:MAX_TRANSLATED_LEN]
+        if translated:
+            return translated[:MAX_TRANSLATED_LEN]
+
+        age = (now or time.time()) - (post["created_ts"] or 0)
+        if age < TRANSLATION_GRACE_SECONDS:
+            raise TranslationDeferred(post["id"])
+        return (TRANSLATION_FALLBACK_NOTE + post["content"])[:MAX_TRANSLATED_LEN]
     # Media-only posts have nothing to translate. These placeholders are shown
     # in the Chinese-language channel, so they stay in Chinese
     # ("Trump posted a video / an image / a post.").
@@ -370,16 +467,145 @@ FONT_META = get_font(19, bold=False)
 FONT_VIDEO = get_font(26, bold=True)
 
 
-def download_image(url, timeout=20):
+class MediaTooLarge(Exception):
+    pass
+
+
+def read_limited(response, max_bytes):
+    length = response.headers.get("Content-Length", "")
+    if length.isdigit() and int(length) > max_bytes:
+        raise MediaTooLarge(f"Content-Length {length} > {max_bytes}")
+
+    buffer = bytearray()
+    for chunk in response.iter_content(65536):
+        buffer += chunk
+        if len(buffer) > max_bytes:
+            raise MediaTooLarge(f"more than {max_bytes} bytes")
+    return bytes(buffer)
+
+
+def fetch_media(url, max_bytes):
+    """Download a media file. Returns (bytes, content_type) or None.
+
+    The Truth Social CDN rejects non-browser TLS handshakes, so a browser
+    impersonating client is tried first and plain requests second. Every
+    failure is logged with its transport and reason.
+    """
     if not url:
         return None
+
+    transports = []
+    if browser_requests is not None:
+        transports.append((
+            "browser-tls",
+            lambda: browser_requests.get(
+                url, impersonate="chrome", headers={"Referer": MEDIA_HEADERS["Referer"]},
+                timeout=MEDIA_TIMEOUT, stream=True,
+            ),
+        ))
+    transports.append((
+        "requests",
+        lambda: requests.get(url, headers=MEDIA_HEADERS, timeout=MEDIA_TIMEOUT, stream=True),
+    ))
+
+    for name, send in transports:
+        try:
+            response = send()
+            try:
+                if response.status_code >= 400:
+                    print(f"Media download via {name} got HTTP {response.status_code}: {url}")
+                    continue
+                content = read_limited(response, max_bytes)
+                content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                return content, content_type
+            finally:
+                response.close()
+        except MediaTooLarge as exc:
+            print(f"Media too large, not downloading ({exc}): {url}")
+            return None
+        except Exception as exc:
+            print(f"Media download via {name} failed: {type(exc).__name__}: {exc}: {url}")
+
+    return None
+
+
+def open_image(content):
     try:
-        response = requests.get(url, headers=MEDIA_HEADERS, timeout=timeout)
-        response.raise_for_status()
-        return Image.open(io.BytesIO(response.content)).convert("RGB")
+        return Image.open(io.BytesIO(content)).convert("RGB")
     except Exception as exc:
-        print(f"Image download failed: {exc}")
+        print(f"Downloaded file is not a readable image: {exc}")
         return None
+
+
+def download_image(url):
+    downloaded = fetch_media(url, MAX_IMAGE_BYTES)
+    return open_image(downloaded[0]) if downloaded else None
+
+
+def prepare_media(post):
+    """Fetch the post's media ahead of rendering and posting.
+
+    Returns {"card_image": PIL image or None, "files": [(name, bytes, source_url)],
+    "links": [urls]}. The first image goes into the card. Videos and further
+    images are attached when they fit Discord's upload limit. Anything that
+    could not be fetched or does not fit is returned as a link instead, so
+    Discord can try to unfurl it itself.
+    """
+    bundle = {"card_image": None, "files": [], "links": []}
+    budget = MAX_UPLOAD_BYTES - CARD_RESERVE_BYTES
+
+    for index, media in enumerate(post.get("media_items", [])[:MAX_MEDIA_ITEMS]):
+        url, kind = media["url"], media["type"]
+
+        # HLS playlists cannot be attached as a file; hand the URL to Discord.
+        if urlparse(url).path.lower().endswith(".m3u8"):
+            bundle["links"].append(url)
+            if bundle["card_image"] is None:
+                bundle["card_image"] = download_image(media["preview_url"])
+            continue
+
+        downloaded = fetch_media(url, budget if kind == "video" else MAX_IMAGE_BYTES)
+        if downloaded is None:
+            bundle["links"].append(url)
+            if kind == "video" and bundle["card_image"] is None:
+                bundle["card_image"] = download_image(media["preview_url"])
+            continue
+
+        content, content_type = downloaded
+        if kind == "unknown":
+            if content_type.startswith("image/"):
+                kind = "image"
+            elif content_type.startswith("video/"):
+                kind = "video"
+
+        if kind == "image":
+            image = open_image(content)
+            if image is None:
+                bundle["links"].append(url)
+            elif bundle["card_image"] is None:
+                bundle["card_image"] = image
+            elif len(content) <= budget:
+                budget -= len(content)
+                bundle["files"].append((f"trump_{post['id']}_{index}{guess_extension(url, content_type, '.jpg')}", content, url))
+            else:
+                bundle["links"].append(url)
+        elif kind == "video" and len(content) <= budget:
+            budget -= len(content)
+            bundle["files"].append((f"trump_{post['id']}_{index}{guess_extension(url, content_type, '.mp4')}", content, url))
+            if bundle["card_image"] is None:
+                bundle["card_image"] = download_image(media["preview_url"])
+        else:
+            bundle["links"].append(url)
+
+    return bundle
+
+
+def guess_extension(url, content_type, default):
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS:
+        return suffix
+    return {"image/png": ".png", "image/webp": ".webp", "image/gif": ".gif",
+            "video/quicktime": ".mov", "video/webm": ".webm"}.get(content_type, default)
 
 
 def draw_default_avatar(size=72):
@@ -469,7 +695,7 @@ def rounded_rectangle(draw, box, radius, fill, outline=None, width=1):
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
 
 
-def create_post_card(post):
+def create_post_card(post, media_image=None):
     CARD_DIR.mkdir(parents=True, exist_ok=True)
     card_path = CARD_DIR / f"trump_{post['id']}.png"
 
@@ -499,19 +725,12 @@ def create_post_card(post):
     body_line_height = 39
     body_height = max(1, len(body_lines)) * body_line_height
 
-    source_image = None
-    video_preview = None
-
-    if post["media"]:
-        if post["media"]["type"] == "image":
-            source_image = download_image(post["media"]["url"])
-        elif post["media"]["type"] == "video":
-            video_preview = download_image(post["media"]["preview_url"])
+    is_video = bool(post["media"]) and post["media"]["type"] == "video"
 
     media_height = 0
-    if source_image or video_preview:
+    if media_image:
         media_height = min(560, int(content_width * 0.63)) + 28
-    elif post["media"] and post["media"]["type"] == "video":
+    elif is_video:
         media_height = min(460, int(content_width * 0.52)) + 28
 
     footer_height = 82
@@ -540,8 +759,8 @@ def create_post_card(post):
         draw.text((padding, y), line, font=FONT_BODY, fill="#30323A")
         y += body_line_height
 
-    if source_image or video_preview:
-        media = source_image or video_preview
+    if media_image:
+        media = media_image
         image_top = y + 12
         image_height = media_height - 28
 
@@ -550,7 +769,7 @@ def create_post_card(post):
         ImageDraw.Draw(mask).rounded_rectangle((0, 0, content_width, image_height), radius=18, fill=255)
         card.paste(fitted, (padding, image_top), mask)
 
-        if post["media"]["type"] == "video":
+        if is_video:
             center_x = padding + content_width // 2
             center_y = image_top + image_height // 2
             draw.ellipse((center_x - 47, center_y - 47, center_x + 47, center_y + 47), fill="#111827")
@@ -561,7 +780,7 @@ def create_post_card(post):
 
         y = image_top + image_height + 28
 
-    elif post["media"] and post["media"]["type"] == "video":
+    elif is_video:
         video_top = y + 12
         video_height = media_height - 28
 
@@ -616,22 +835,46 @@ def build_embeds(post, translated_text, card_filename):
     return embeds[:10]
 
 
+def format_links(links):
+    # Bare URLs on their own lines, so Discord unfurls them into a player/preview.
+    return "🎞️ 原始媒体：\n" + "\n".join(links)
+
+
 def post_to_discord(post):
+    """Translate, render and send one post.
+
+    Raises TranslationDeferred, before anything is sent, when translation
+    failed on a fresh post.
+    """
     translated_text = build_description(post)
-    card_path = create_post_card(post)
+    media = prepare_media(post)
+    card_path = create_post_card(post, media["card_image"])
 
-    payload = {
-        "embeds": build_embeds(post, translated_text, card_path.name),
-        "allowed_mentions": {"parse": []},
-    }
-
-    try:
+    def send(attachments, links):
+        payload = {
+            "embeds": build_embeds(post, translated_text, card_path.name),
+            "allowed_mentions": {"parse": []},
+        }
+        if links:
+            payload["content"] = format_links(links)
         post_webhook(
             os.environ[WEBHOOK_ENV],
             payload,
-            file=(card_path.name, card_path.read_bytes()),
-            timeout=60,
+            files=[(card_path.name, card_path.read_bytes()), *[(n, c) for n, c, _ in attachments]],
+            timeout=120,
         )
+
+    try:
+        try:
+            send(media["files"], media["links"])
+        except requests.HTTPError as exc:
+            # 413: the upload was over Discord's size limit. Resend with the
+            # attachments replaced by links rather than losing the post.
+            status = getattr(exc.response, "status_code", None)
+            if status != 413 or not media["files"]:
+                raise
+            print(f"Upload too large for post {post['id']}, resending with links instead of files")
+            send([], media["links"] + [url for _, _, url in media["files"]])
     finally:
         card_path.unlink(missing_ok=True)
 
@@ -697,7 +940,14 @@ def main():
     state["etag"] = None
 
     for post in posts_to_send:
-        post_to_discord(post)
+        try:
+            post_to_discord(post)
+        except TranslationDeferred:
+            # DeepL is most likely down for every post, so stop here. Nothing
+            # was sent and nothing is recorded; the next run starts again from
+            # this post, in order.
+            print(f"Translation failed for post {post['id']}, holding it back for the next run.")
+            break
 
         sent_at = time.time()
         state["seen"][post["id"]] = sent_at
