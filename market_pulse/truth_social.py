@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import sys
 import time
 from datetime import datetime, timezone
 from itertools import islice
@@ -36,8 +37,10 @@ WEBHOOK_ENV = "DISCORD_WEBHOOK_URL_TRUMP"
 DEEPL_KEY_ENV = "DEEPL_API_KEY"      # optional
 GEMINI_KEY_ENV = "GEMINI_API_KEY"    # optional
 GEMINI_MODEL_ENV = "GEMINI_MODEL"
-# Tried in order on a 404 (Google retires models; the "-latest" alias outlives them).
-GEMINI_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-flash-latest")
+# Tried in order on a 404 (Google retires models). Chosen from a live probe on
+# GitHub Actions (--check-translation --probe-models): the lite models answer
+# in under a second, while 3.7/3.8-flash and the "-latest" alias timed out.
+GEMINI_FALLBACK_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_TIMEOUT = 20
 GEMINI_ATTEMPTS = 2
@@ -1101,6 +1104,8 @@ def list_gemini_models():
         print(f"Could not list Gemini models: {type(exc).__name__}: {exc}")
         return
     print("Gemini models with generateContent:", ", ".join(names))
+    if "--probe-models" not in sys.argv:
+        return
 
     for name in names:
         if "flash" not in name or any(x in name for x in ("image", "tts", "live", "audio", "embedding")):
@@ -1139,8 +1144,6 @@ def check_translation():
 
 
 if __name__ == "__main__":
-    import sys
-
     if "--check-translation" in sys.argv:
         check_translation()
     else:
