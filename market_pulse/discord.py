@@ -1,6 +1,7 @@
 """Shared Discord webhook client with bounded rate-limit retries."""
 
 import json
+import mimetypes
 import time
 
 import requests
@@ -8,11 +9,23 @@ import requests
 MAX_RETRIES = 5
 
 
-def post_webhook(webhook_url, payload=None, file=None, *, session=None, timeout=30):
+def _multipart_files(file, files):
+    if files:
+        return {
+            f"files[{index}]": (name, content, mimetypes.guess_type(name)[0] or "application/octet-stream")
+            for index, (name, content) in enumerate(files)
+        }
+    filename, content = file
+    return {"file": (filename, content, "image/png")}
+
+
+def post_webhook(webhook_url, payload=None, file=None, *, files=None, session=None, timeout=30):
     """Post a message to a Discord webhook.
 
     payload is the JSON message body. file is an optional (filename, bytes)
-    PNG attachment; embeds reference it as attachment://<filename>.
+    PNG attachment; embeds reference it as attachment://<filename>. files is a
+    list of (filename, bytes) attachments of any type (images, mp4 video); the
+    content type is guessed from the extension.
 
     On HTTP 429 this waits for the returned retry_after and tries again, up to
     MAX_RETRIES attempts in total, then raises RuntimeError. Any other error
@@ -21,17 +34,16 @@ def post_webhook(webhook_url, payload=None, file=None, *, session=None, timeout=
     http = session or requests
 
     for attempt in range(1, MAX_RETRIES + 1):
-        if file is None:
+        if file is None and not files:
             response = http.post(webhook_url, json=payload, timeout=timeout)
         else:
-            filename, content = file
             data = None
             if payload is not None:
                 data = {"payload_json": json.dumps(payload, ensure_ascii=False)}
             response = http.post(
                 webhook_url,
                 data=data,
-                files={"file": (filename, content, "image/png")},
+                files=_multipart_files(file, files),
                 timeout=timeout,
             )
 

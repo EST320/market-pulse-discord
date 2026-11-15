@@ -24,7 +24,7 @@ In production since July 2026.
 | Tracker | Source | Posts | Cadence |
 |---|---|---|---|
 | [`wallstreetcn`](market_pulse/wallstreetcn.py) | Wallstreetcn live feed: US, A-share and HK channels | Headline + body | Every 2 minutes per channel |
-| [`truth_social`](market_pulse/truth_social.py) | CNN's public Truth Social archive | Chinese translation + card image of the original post | Every 5 minutes |
+| [`truth_social`](market_pulse/truth_social.py) | CNN's public Truth Social archive | Chinese translation + card image of the original post; videos and extra images attached (or linked when too large / not downloadable) | Every 5 minutes |
 | [`fear_greed`](market_pulse/fear_greed.py) | CNN Fear & Greed Index, alternative.me Crypto Fear & Greed Index | One image with both gauges and their history, plus the change since last run | Scheduled |
 | [`earnings_calendar`](market_pulse/earnings_calendar.py) | Nasdaq's public calendar API, Yahoo Finance | One image of next week's most actively traded reporters, a column per day, with market cap and consensus EPS | Fridays after the US close |
 | [`market_close`](market_pulse/market_close.py) | Yahoo Finance | Chinese-language image: S&P 500, Nasdaq, Dow, equal-weight S&P 500 (RSP), Russell 2000 (IWM), semiconductors (SOXX), a heat row of the 11 sectors, VIX, 10-year yield, dollar index, gold, oil, bitcoin | Weekdays, 4:15 pm New York time |
@@ -49,7 +49,7 @@ flowchart LR
 1. **Incremental fetch.** Page through the source by cursor until a page reaches past the age window. No full scans.
 2. **Dedup.** Compare item IDs against the state file. The Truth Social archive can return the same post under different IDs, so that tracker adds a second layer keyed on a hash of the content.
 3. **Age filter.** Skip items that are too old or have no timestamp (3 hours for flash news, 12 hours for Truth Social), so historical content is never pushed by accident.
-4. **Format.** Translate with DeepL, render images with Pillow / Matplotlib, and build the Discord embed.
+4. **Format.** Translate (Gemini free tier, then DeepL, then Google's keyless endpoint), render images with Pillow / Matplotlib, and build the Discord embed.
 5. **Deliver.** Post through a Discord webhook. An item is written to state **only after it has been delivered**, so a failure midway neither repeats what was sent nor loses what wasn't.
 6. **Persist.** The workflow saves the state file to the `state` branch for the next run to read.
 
