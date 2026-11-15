@@ -36,7 +36,8 @@ WEBHOOK_ENV = "DISCORD_WEBHOOK_URL_TRUMP"
 DEEPL_KEY_ENV = "DEEPL_API_KEY"      # optional
 GEMINI_KEY_ENV = "GEMINI_API_KEY"    # optional
 GEMINI_MODEL_ENV = "GEMINI_MODEL"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+# Tried in order on a 404 (Google retires models; the "-latest" alias outlives them).
+GEMINI_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-flash-latest")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GOOGLE_FREE_URL = "https://translate.googleapis.com/translate_a/single"
 
@@ -405,26 +406,35 @@ def translate_gemini(body):
     key = os.environ.get(GEMINI_KEY_ENV)
     if not key:
         return None
-    url = GEMINI_URL.format(model=os.environ.get(GEMINI_MODEL_ENV) or DEFAULT_GEMINI_MODEL)
 
-    def once():
-        response = requests.post(
-            url,
-            headers={"x-goog-api-key": key},
-            json={
-                "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
-                "contents": [{"role": "user", "parts": [{"text": f"<post>\n{body}\n</post>"}]}],
-                "generationConfig": {"temperature": 0.2},
-            },
-            timeout=45,
-        )
-        if response.status_code in (400, 401, 403, 404):
-            raise PermanentTranslationError(f"HTTP {response.status_code}: {response.text[:200]}")
-        response.raise_for_status()  # 429 / 5xx are retried
-        parts = response.json()["candidates"][0]["content"]["parts"]
-        return "".join(part.get("text", "") for part in parts)
+    models = [m for m in (os.environ.get(GEMINI_MODEL_ENV), *GEMINI_FALLBACK_MODELS) if m]
+    for model in models:
+        retired = []
 
-    return _retry("Gemini", once)
+        def once():
+            response = requests.post(
+                GEMINI_URL.format(model=model),
+                headers={"x-goog-api-key": key},
+                json={
+                    "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+                    "contents": [{"role": "user", "parts": [{"text": f"<post>\n{body}\n</post>"}]}],
+                    "generationConfig": {"temperature": 0.2},
+                },
+                timeout=45,
+            )
+            if response.status_code == 404:
+                retired.append(True)  # unknown or retired model: try the next one
+                raise PermanentTranslationError(f"model {model} not available: {response.text[:120]}")
+            if response.status_code in (400, 401, 403):
+                raise PermanentTranslationError(f"HTTP {response.status_code}: {response.text[:200]}")
+            response.raise_for_status()  # 429 / 5xx are retried
+            parts = response.json()["candidates"][0]["content"]["parts"]
+            return "".join(part.get("text", "") for part in parts)
+
+        result = _retry(f"Gemini ({model})", once)
+        if result or not retired:
+            return result
+    return None
 
 
 def translate_deepl(body):

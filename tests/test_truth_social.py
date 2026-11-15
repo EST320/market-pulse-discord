@@ -326,6 +326,17 @@ class TranslatorChainTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"], {"x-goog-api-key": "k"})
         self.assertIn("<post>\nHello\n</post>", post.call_args.kwargs["json"]["contents"][0]["parts"][0]["text"])
 
+    def test_gemini_retired_model_falls_through_to_the_next_one(self):
+        gone = mock.Mock(status_code=404, text="no longer available")
+        ok = mock.Mock(status_code=200)
+        ok.json.return_value = {"candidates": [{"content": {"parts": [{"text": "你好"}]}}]}
+        with mock.patch.dict("os.environ", {ts.GEMINI_KEY_ENV: "k", ts.GEMINI_MODEL_ENV: "old-model"}), \
+                mock.patch.object(ts.requests, "post", side_effect=[gone, ok]) as post:
+            self.assertEqual(ts.translate_gemini("Hello"), "你好")
+        urls = [c.args[0] for c in post.call_args_list]
+        self.assertIn("old-model", urls[0])
+        self.assertIn(ts.GEMINI_FALLBACK_MODELS[0], urls[1])
+
     def test_gemini_bad_key_is_not_retried(self):
         reply = mock.Mock(status_code=403, text="denied")
         with mock.patch.dict("os.environ", {ts.GEMINI_KEY_ENV: "k"}), \
