@@ -952,9 +952,21 @@ def build_embeds(post, translated_text, card_filename):
     return embeds[:10]
 
 
-def format_links(links):
-    # Bare URLs on their own lines, so Discord unfurls them into a player/preview.
-    return "🎞️ 原始媒体：\n" + "\n".join(links)
+def format_media_note(post, undelivered_urls):
+    """One line telling the reader the media could not be attached.
+
+    The raw CDN URLs refuse automated access (and Discord cannot unfurl them
+    either), so the note points at the post page instead, which opens normally
+    in a browser. The <> keeps Discord from adding a preview of that page.
+    """
+    kinds = {m["type"] for m in post.get("media_items", []) if m["url"] in undelivered_urls}
+    if kinds == {"video"}:
+        label = "🎞️ 本帖含视频"
+    elif kinds == {"image"}:
+        label = "🖼️ 本帖含图片"
+    else:
+        label = "📎 本帖含图片/视频"
+    return f"{label}，无法自动获取，[点击查看原帖](<{post['url']}>)"
 
 
 def post_to_discord(post):
@@ -973,7 +985,7 @@ def post_to_discord(post):
             "allowed_mentions": {"parse": []},
         }
         if links:
-            payload["content"] = format_links(links)
+            payload["content"] = format_media_note(post, links)
         post_webhook(
             os.environ[WEBHOOK_ENV],
             payload,
