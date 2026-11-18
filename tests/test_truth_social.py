@@ -509,7 +509,19 @@ class PostToDiscordTest(unittest.TestCase):
             ts.post_to_discord(self.post())
         retry = hook.call_args_list[1]
         self.assertEqual([n for n, _ in retry.kwargs["files"]], ["trump_9.png"])
-        self.assertIn("https://x/v.mp4", retry.args[1]["content"])
+        note = retry.args[1]["content"]
+        self.assertIn("本帖含视频", note)
+        self.assertIn("<https://t/9>", note)  # points at the post, not the CDN file
+        self.assertNotIn("https://x/v.mp4", note)
+
+    def test_undeliverable_image_gets_a_one_line_note_with_the_post_link(self):
+        post = self.post()
+        post["media"] = post["media_items"][0] = {"url": "https://x/a.jpg", "type": "image", "preview_url": None}
+        with mock.patch.object(ts, "fetch_media", return_value=None), \
+                mock.patch.object(ts, "post_webhook") as hook:
+            ts.post_to_discord(post)
+        content = hook.call_args.args[1]["content"]
+        self.assertEqual(content, "🖼️ 本帖含图片，无法自动获取，[点击查看原帖](<https://t/9>)")
 
     def test_other_http_errors_are_raised(self):
         failure = ts.requests.HTTPError("500", response=mock.Mock(status_code=500))
