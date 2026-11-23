@@ -33,6 +33,8 @@ In production since July 2026.
 
 The Wallstreetcn feed is Chinese, and Truth Social posts are translated into Chinese, so most of the Discord output is Chinese-language. Code, logs and documentation are in English.
 
+Notes on the Truth Social tracker's translation chain and its media limitation (the image CDN refuses GitHub-hosted runners) are in [docs/truth-social-notes.md](docs/truth-social-notes.md).
+
 ## How it works
 
 ```mermaid
@@ -227,7 +229,7 @@ Only `truth_social` uses `hashes` and `etag`. `seen_feargreed.json` instead stor
 - Reads the public Truth Social archive JSON maintained by CNN. The archive is a ~20 MB file holding every post ever made, so the tracker sends the `ETag` of the last version it fully processed and stops on `304 Not Modified` without downloading anything. The ETag is only stored once every new post in that version has been delivered.
 - When the archive did change, posts outside the age window are dropped on their timestamp alone before any parsing or hashing.
 - Deduplicates on both post ID and content hash.
-- The English original is rendered as a card image; the DeepL Chinese translation goes in the embed description, and the title links back to the original post.
+- The English original is rendered as a card image; the Chinese translation goes in the embed description, and the title links back to the original post.
 
 ### Fear & Greed
 
@@ -310,7 +312,8 @@ git worktree add state state
 | `DISCORD_WEBHOOK_URL_EARNINGS` | Earnings calendar channel |
 | `DISCORD_WEBHOOK_URL_MARKET` | Market close channel. Optional: shares the Fear & Greed channel when unset |
 | `DISCORD_WEBHOOK_URL_IPO` | IPO calendar channel. Optional: shares the earnings calendar channel when unset |
-| `DEEPL_API_KEY` | DeepL translation |
+| `GEMINI_API_KEY` | Truth Social translation, primary backend (free Google AI Studio key). Optional, but without it translation falls back to DeepL, then to an unreliable keyless endpoint |
+| `DEEPL_API_KEY` | Truth Social translation, second backend. Optional |
 
 ## Known limitations and roadmap
 
